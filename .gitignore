@@ -8,9 +8,10 @@ __pycache__/
 *.py[cod]
 .venv/
 
-# Generated data
-server/.cache/
-server/.index/
+# Generated data (the index and cached web pages are committed for offline builds)
+server/.cache/extracted/
+server/.cache/models/
+server/.index/partial*
 
 # Node
 node_modules/

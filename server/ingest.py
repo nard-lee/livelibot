@@ -38,10 +38,14 @@ def main(argv: list[str] | None = None) -> int:
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)-8s %(message)s")
 
-    if not args.local_only:
+    if config.INGEST_FETCH_URLS and not args.local_only:
         urls = read_urls()
         log.info("fetching %d URL(s)", len(urls))
         _fetch_urls(urls)
+    else:
+        # Offline/production runs reuse the pages committed in .cache/urls, so a
+        # flaky site (403, DNS failure) cannot break the build.
+        log.info("using cached web pages (INGEST_FETCH_URLS=0)")
 
     index = rebuild()
     for document in index["details"]:

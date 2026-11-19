@@ -135,29 +135,38 @@ vector matrix, BM25, embedding metadata, fingerprint, build time.
 - `INDEX_VERSION` (currently `9`; bump when chunking/format changes),
 - `EMBED_MODEL`,
 - chunk settings `[RAG_CHUNK_CHARS, RAG_CHUNK_OVERLAP]`,
-- every source file's `name` and `size`. `mtime` is deliberately excluded:
-  Render's build artifact upload does not preserve nanosecond timestamps, so an
-  mtime-based fingerprint would force a full re-embed on every deploy and cold
-  start.
+- every source file's stable name and `sha256(content)`. Knowledge text files
+  hash their UTF-8 content with line endings normalised (`\r\n` → `\n`), PDFs
+  hash their bytes, and cached web pages hash their extracted `text` — never
+  `fetched_at`, title, `mtime` or size, so the same content yields the same
+  fingerprint on any machine and checkout.
 
 `ensure_index()`:
 
 1. Recompute the fingerprint; if it matches the in-memory one, return.
 2. Try loading `.index/` from disk (fingerprint and version must match, vector
    row count must match item count).
-3. Otherwise rebuild: read sources → chunk → embed → save.
+3. In production (`PRODUCTION=1`, automatically set by Render), stop here with
+   one error log line and serve "The knowledge base is being updated" — never
+   rebuild and never call the embedding API at startup.
+4. Otherwise rebuild: read sources → chunk → embed → save.
 
 ### Vector reuse
 
 On rebuild, chunks whose **exact text** is already in the current in-memory
-index reuse their vectors; only new text is embedded, in batches of 32. This
-keeps uploads cheap when most of the corpus is unchanged.
+index reuse their vectors; only new text is embedded, in batches of 32 with
+`EMBED_DELAY_SECONDS` between batches. Each finished batch is persisted to
+`.index/partial.npz` before the next one starts, so an interrupted ingest keeps
+its progress and the next run resumes from that point instead of re-embedding.
 
 ### Persistence
 
+- `.index/index.json` and `.index/vectors.npy` are committed to git, so a fresh
+  clone loads them without calling the embedding API.
 - `.index/index.json`: metadata plus all chunk items
   (`source_id`, `title`, `url`, `content`) and a UTC `built_at`.
 - `.index/vectors.npy`: normalized `float32` matrix.
+- `.index/partial.npz`: git-ignored progress file for interrupted ingests.
 - Writes go to pid-suffixed temp files and `os.replace` them into place, so the
   server and `ingest.py` can write concurrently without corrupting the index.
 
@@ -165,7 +174,9 @@ keeps uploads cheap when most of the corpus is unchanged.
 
 At startup (daemon thread, `WARMUP=1`): `ensure_index()`, then parse documents
 once so PDF extraction is cached before the first user question. No model is
-loaded — embeddings are remote calls.
+loaded — embeddings are remote calls. A matching committed index is loaded, so
+no embedding request is made; a stale production index yields the "updating"
+message instead of a rebuild.
 
 ---
 
@@ -325,6 +336,9 @@ loader).
 | `RAG_RERANK_MAX_TOKENS` | `600` | Reranker output budget |
 | `INDEX_VERSION` | `9` | Bump to invalidate on-disk indexes |
 | `WARMUP` | `1` | Warm index + model at startup |
+| `INGEST_FETCH_URLS` | `1` | Fetch `urls.txt`; `0` reuses `.cache/urls` |
+| `EMBED_DELAY_SECONDS` | `1` | Pause between embedding batches |
+| `PRODUCTION` | `0` (auto on Render) | Never rebuild at startup |
 
 Paths default to `server/knowledge`, `server/.cache`, `server/.cache/urls`,
 `server/.index`.
@@ -336,11 +350,16 @@ Paths default to `server/knowledge`, `server/.cache`, `server/.cache/urls`,
 - **Vectors are always L2-normalized**; never persist unnormalized rows, or
   cosine becomes a magnitude contest.
 - **The fingerprint is the only staleness signal.** Changing a source file's
-  name or size, the embedding model, or the chunk sizes rebuilds; bump
-  `INDEX_VERSION` for chunking/format changes. A same-size edit is not detected
-  — run `python ingest.py`, which forces a rebuild.
+  content, name, the embedding model, or the chunk sizes rebuilds; bump
+  `INDEX_VERSION` for chunking/format changes. Content hashing (SHA-256) means
+  same-size edits and line-ending changes are handled correctly, and the index
+  built on one machine matches a clone on another.
+- **The index is a build artifact committed to git.** Rebuild locally with
+  `python ingest.py`, then `git add .index .cache/urls && git commit`. Deploys
+  never embed; a stale production index serves an "updating" message.
 - **Writes are atomic** (`os.replace` from a pid-suffixed temp file) because the
-  API server and `ingest.py` can build concurrently.
+  API server and `ingest.py` can build concurrently. Interrupted ingests resume
+  from the atomically written `.index/partial.npz`.
 - **The per-source cap runs last**, after rerank, so one long document cannot
   monopolize the context window.
 - **Dense score is informational after fusion.** Displayed `score` is cosine,

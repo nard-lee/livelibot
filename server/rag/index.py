@@ -13,13 +13,14 @@ import json
 import logging
 import os
 import threading
+import time
 from datetime import datetime, timezone
 
 import numpy as np
 
 import config
 from rag.chunking import chunk_text
-from rag.embedder import embed
+from rag.embedder import BATCH_SIZE, embed
 from rag.keyword import BM25
 from rag.progress import log_event, set_progress
 from rag.sources import load_documents, source_files
@@ -29,6 +30,8 @@ log = logging.getLogger(__name__)
 INDEX_PATH = config.INDEX_DIR / "index.json"
 VECTORS_PATH = config.INDEX_DIR / "vectors.npy"
 
+UPDATING_MESSAGE = "The knowledge base is being updated. Please try again shortly."
+
 _LOCK = threading.RLock()
 _items: list[dict] = []
 _vectors: np.ndarray | None = None
@@ -36,6 +39,7 @@ _bm25: BM25 | None = None
 _meta: dict | None = None
 _fingerprint: str | None = None
 _built_at: str | None = None
+_unavailable: str | None = None
 
 
 # ---------------------------------------------------------------- public state
@@ -68,7 +72,14 @@ def stats() -> dict:
         "built_at": _built_at,
         "rerank": config.RAG_RERANK,
         "bm25": _bm25 is not None,
+        "updating": _unavailable is not None,
     }
+
+
+def unavailable() -> str | None:
+    """Reason the index cannot answer yet, or None when it is ready."""
+    ensure_index()
+    return _unavailable
 
 
 # ------------------------------------------------------------------ building
@@ -123,24 +134,102 @@ def _chunk_documents(documents: list[dict]) -> tuple[list[dict], list[str]]:
     return items, texts
 
 
-def _embed_missing(texts: list[str]) -> dict[str, np.ndarray]:
-    """Embed only chunks that are not already in the index (batched + logged)."""
-    fresh: dict[str, np.ndarray] = {}
-    batch_size = 32
-    embedded = 0
-    set_progress("embedding", f"Embedding 0/{len(texts)} new chunk(s)", 0, len(texts))
+def _text_key(text: str) -> str:
+    """Stable key for a chunk in the partial-embedding cache."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
-    for start in range(0, len(texts), batch_size):
-        batch = texts[start:start + batch_size]
+
+def _partial_path():
+    # Resolved per call so tests and INDEX_DIR overrides take effect.
+    return config.INDEX_DIR / "partial.npz"
+
+
+def _load_partial() -> dict[str, np.ndarray]:
+    """Vectors saved by an interrupted ingest, keyed by chunk hash."""
+    try:
+        with np.load(_partial_path(), allow_pickle=False) as data:
+            meta = json.loads(str(data["meta"]))
+            keys = [str(key) for key in data["keys"]]
+            vectors = data["vectors"]
+    except Exception:
+        # Missing or unreadable progress file: start this run from scratch.
+        return {}
+
+    if meta != _embedding_meta() or vectors.ndim != 2 or vectors.shape[0] != len(keys):
+        return {}
+    return {
+        key: np.asarray(vectors[index], dtype=np.float32)
+        for index, key in enumerate(keys)
+    }
+
+
+def _save_partial(vectors: dict[str, np.ndarray]) -> None:
+    """Persist finished batches atomically so a rerun can continue."""
+    if not vectors:
+        return
+    try:
+        config.INDEX_DIR.mkdir(parents=True, exist_ok=True)
+        keys = sorted(vectors)
+        rows = np.asarray([vectors[key] for key in keys], dtype=np.float32)
+        tmp = config.INDEX_DIR / f"partial.{os.getpid()}.tmp.npz"
+        np.savez(
+            tmp,
+            meta=np.array(json.dumps(_embedding_meta(), sort_keys=True)),
+            keys=np.array(keys, dtype=str),
+            vectors=rows,
+        )
+        os.replace(tmp, _partial_path())
+    except OSError as exc:
+        log.warning("could not save partial embeddings: %s", exc)
+
+
+def _drop_partial() -> None:
+    try:
+        _partial_path().unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _embed_missing(texts: list[str]) -> dict[str, np.ndarray]:
+    """Embed only chunks that are not already in the index (batched + logged).
+
+    Each batch is persisted before the next one starts, so an interrupted run
+    keeps every finished batch and the next run resumes instead of re-embedding.
+    """
+    fresh: dict[str, np.ndarray] = {}
+    recovered = _load_partial()
+    pending: list[str] = []
+    for text in texts:
+        vector = recovered.get(_text_key(text))
+        if vector is None:
+            pending.append(text)
+        else:
+            fresh[text] = vector
+
+    if fresh:
+        log.info("resumed %d chunk(s) from partial embeddings", len(fresh))
+
+    total = len(texts)
+    done = len(fresh)
+    set_progress("embedding", f"Embedding {done}/{total} new chunk(s)", done, total)
+
+    for start in range(0, len(pending), BATCH_SIZE):
+        batch = pending[start:start + BATCH_SIZE]
         for text, vector in zip(batch, embed(batch)):
-            fresh[text] = np.asarray(vector, dtype=np.float32)
-        embedded += len(batch)
+            vector = np.asarray(vector, dtype=np.float32)
+            fresh[text] = vector
+            recovered[_text_key(text)] = vector
+        _save_partial(recovered)
+
+        done += len(batch)
         set_progress(
             "embedding",
-            f"Embedding {embedded}/{len(texts)} new chunk(s)",
-            embedded,
-            len(texts),
+            f"Embedding {done}/{total} new chunk(s)",
+            done,
+            total,
         )
+        if start + len(batch) < len(pending) and config.EMBED_DELAY_SECONDS > 0:
+            time.sleep(config.EMBED_DELAY_SECONDS)
 
     return fresh
 
@@ -257,6 +346,7 @@ def _save_to_disk(fingerprint: str, items: list[dict], vectors: np.ndarray) -> N
         tmp_meta = config.INDEX_DIR / f"index.{os.getpid()}.tmp.json"
         tmp_meta.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
         os.replace(tmp_meta, INDEX_PATH)
+        _drop_partial()
     except OSError as exc:
         log.warning("could not persist index: %s", exc)
 
@@ -264,7 +354,7 @@ def _save_to_disk(fingerprint: str, items: list[dict], vectors: np.ndarray) -> N
 # ------------------------------------------------------------------ lifecycle
 
 def _rebuild(fingerprint: str) -> None:
-    global _fingerprint
+    global _fingerprint, _unavailable
 
     try:
         set_progress("reading", "Reading sources")
@@ -293,6 +383,7 @@ def _rebuild(fingerprint: str) -> None:
             datetime.now(timezone.utc).isoformat(timespec="seconds"),
         )
         _fingerprint = fingerprint
+        _unavailable = None
         set_progress(
             "done",
             f"Index ready: {len(items)} chunk(s) from {len(documents)} document(s)",
@@ -306,8 +397,13 @@ def _rebuild(fingerprint: str) -> None:
 
 
 def ensure_index(force: bool = False) -> None:
-    """Load a valid on-disk index or rebuild from sources when stale."""
-    global _fingerprint
+    """Load a valid on-disk index or rebuild from sources when stale.
+
+    In production a stale index is never rebuilt at startup: rebuilding costs
+    embedding quota and can fail on a deploy. The app serves UPDATING_MESSAGE
+    until the committed index matches again.
+    """
+    global _fingerprint, _unavailable
 
     with _LOCK:
         fingerprint = _compute_fingerprint()
@@ -315,8 +411,19 @@ def ensure_index(force: bool = False) -> None:
             return
         if not force and _load_from_disk(fingerprint):
             _fingerprint = fingerprint
+            _unavailable = None
             set_progress("idle")
             return
+        if not force and config.PRODUCTION:
+            _fingerprint = fingerprint
+            _unavailable = UPDATING_MESSAGE
+            log.error(
+                "committed index does not match the sources; serving "
+                "'knowledge base is being updated' instead of rebuilding"
+            )
+            set_progress("idle")
+            return
+        _unavailable = None
         log.info("building index: no valid on-disk index")
         _rebuild(fingerprint)
 
@@ -331,6 +438,10 @@ def warm() -> None:
     """Load the index before the first question."""
     set_progress("warming", "Loading index")
     ensure_index()
+
+    if _unavailable:
+        set_progress("idle")
+        return
 
     # Parse documents once so PDF extraction is cached for later rebuilds.
     try:

@@ -27,4 +27,14 @@ pnpm install
 pnpm dev --port 5199      # proxies /api to port 5001
 ```
 
+After changing the knowledge base, rebuild and commit the index so deploys never
+call the embedding API:
+
+```powershell
+cd server
+python ingest.py
+git add .index .cache/urls
+git commit -m "Rebuild knowledge index"
+```
+
 Server details and API routes: [server/README.md](server/README.md).

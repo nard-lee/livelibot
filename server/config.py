@@ -62,6 +62,19 @@ RAG_RERANK_EFFORT = os.getenv("RAG_RERANK_EFFORT", "low").strip()
 WARMUP = os.getenv("WARMUP", "1").lower() in {"1", "true", "yes"}
 MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(10 * 1024 * 1024)))
 
+# Ingestion: fetch knowledge/urls.txt by default; production builds reuse the
+# committed .cache/urls pages so a flaky site cannot break a deploy.
+INGEST_FETCH_URLS = os.getenv("INGEST_FETCH_URLS", "1").lower() in {"1", "true", "yes"}
+# Pause between embedding batches so the per-minute quota is not exhausted.
+EMBED_DELAY_SECONDS = float(os.getenv("EMBED_DELAY_SECONDS", "1"))
+
+# Production never rebuilds the index at startup: if the committed index does
+# not match the sources, the app serves an "updating" message instead of
+# spending embedding quota or crashing. Render sets RENDER=true.
+PRODUCTION = os.getenv("PRODUCTION", "0").lower() in {"1", "true", "yes"} or (
+    os.getenv("RENDER", "").lower() in {"1", "true", "yes"}
+)
+
 # Bump whenever the on-disk index format or chunking output changes, so stale
 # indexes are rebuilt instead of silently reused.
 INDEX_VERSION = 9

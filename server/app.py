@@ -56,6 +56,9 @@ def health():
     except Exception:
         logging.getLogger(__name__).exception("index stats failed")
         return jsonify({"status": "degraded", "index": None, **llm_info}), 503
+    if index.get("updating"):
+        # Stay up (200) so the platform does not restart-loop the service.
+        return jsonify({"status": "updating", "index": index, **llm_info})
     return jsonify({"status": "ok", "index": index, **llm_info})
 
 

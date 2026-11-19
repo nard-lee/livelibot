@@ -16,7 +16,7 @@ pip install -r requirements.txt
 
 copy .env.example .env    # then set GEMINI_API_KEY
 
-python ingest.py         # fetch URLs + build the index
+python ingest.py         # fetch URLs + build the index (commit .index + .cache/urls)
 python app.py            # http://127.0.0.1:5001
 ```
 
@@ -34,15 +34,24 @@ web-page row also has **Fetch / Re-fetch** (re-download and re-index) and delete
 
 ## Deploy on Render (free plan)
 
-Build: `pip install -r server/requirements.txt && cd server && python ingest.py && cd ../client && npm ci && npm run build`
+Build: `pip install -r server/requirements.txt && cd client && npm install && npm run build`
 Start: `cd server && gunicorn -w 1 --threads 4 -t 120 -b 0.0.0.0:$PORT app:app`
 
-Both commands run from the repo root. `PYTHON_VERSION=3.10.11` pins Python; if
-`npm` is missing on the build host, set `NODE_VERSION` too. Because Flask serves
-`client/dist` at `/`, the API and UI share one origin — leave `ALLOWED_ORIGIN`
-empty (`ADMIN_ENABLED=0` keeps the API read-only). Render provides `PORT`. The
-build embeds the knowledge base through the Gemini API, so `GEMINI_API_KEY`
-must already be set on the service.
+Both commands run from the repo root. The built index (`.index/`) and the web
+page cache (`.cache/urls/`) are committed, so the build installs dependencies
+and compiles the client only — it never calls the embedding API and a flaky
+source site (403, DNS failure) cannot break a deploy. To regenerate the index on
+the build host, run it offline with `INGEST_FETCH_URLS=0 python ingest.py`.
+`PYTHON_VERSION=3.10.11` pins Python; if `npm` is missing on the build host, set
+`NODE_VERSION` too. Because Flask serves `client/dist` at `/`, the API and UI
+share one origin — leave `ALLOWED_ORIGIN` empty (`ADMIN_ENABLED=0` keeps the API
+read-only). Render provides `PORT`. `GEMINI_API_KEY` is needed at runtime for
+answers, not at build time.
+
+At startup a production instance loads the committed index when its
+fingerprint matches the sources. If it does not match, the instance prints one
+error line and answers with "The knowledge base is being updated" instead of
+rebuilding (and spending embedding quota). Rebuild + commit locally to fix it.
 
 ## API
 
@@ -81,12 +90,16 @@ oversized upload, and `502` when the LLM call fails, all with a JSON `error`.
    (`gemini-embedding-001`), so no local model is loaded and the server stays
    small enough for a 512 MB instance.
 5. **Index** (`rag/index.py`) — normalised vectors persisted to `.index/`
-   (`index.json` + `vectors.npy`) and reloaded on start. A fingerprint of source
-   file names and sizes, model name and chunk settings decides whether the cache
-   is valid, so adding, removing or resizing a document triggers a rebuild on
-   the next start. Set `INDEX_VERSION` in `config.py` when chunking or index
-   format changes. Startup warms the index (documents parsed once) in a
-   background thread.
+   (`index.json` + `vectors.npy`) and reloaded on start. The index is committed
+   so a fresh clone and the Render build work offline. A fingerprint of each
+   source's SHA-256 content (line endings normalised; cached web pages hash
+   their extracted text, not their fetch time), plus model name and chunk
+   settings, decides whether the cache is valid. Any machine computes the same
+   fingerprint for the same content, so adding, editing or removing a document
+   triggers a rebuild on the next start. Set `INDEX_VERSION` in `config.py` when
+   chunking or index format changes. Startup warms the index (documents parsed
+   once) in a background thread; in production a stale index is reported as
+   "updating" instead of rebuilt.
 6. **Retrieval** (`rag/search.py`) — dense cosine and BM25 scores are fused with
    reciprocal rank fusion, near-duplicate chunks are dropped, candidates above
    the score floor are reranked by the generation model, and at most
@@ -111,9 +124,19 @@ oversized upload, and `502` when the LLM call fails, all with a JSON `error`.
    regenerated in conversational mode with the topic menu (streams peek at the
    first sentence and switch before showing a bare refusal).
 
-Rebuild explicitly with `python ingest.py` (fetches URLs) or
-`python ingest.py --local-only` (reuses the URL cache). Delete `.index/` to
-force a cold rebuild.
+Rebuild the committed index whenever knowledge files or cached pages change:
+
+```powershell
+python ingest.py                 # fetch URLs locally, then build .index/
+git add .index .cache/urls
+git commit -m "Rebuild knowledge index"
+```
+
+`INGEST_FETCH_URLS=0 python ingest.py` (or `python ingest.py --local-only`)
+reuses the pages committed in `.cache/urls` and never touches the network.
+Delete `.index/` to force a cold rebuild. Interrupted runs keep every finished
+embedding batch in `.index/partial.npz` (git-ignored); rerunning continues from
+that point. `EMBED_DELAY_SECONDS` controls the pause between batches.
 
 Uploads through the API are capped by `MAX_UPLOAD_BYTES` (10 MB by default).
 Local ingestion has **no size cap**: copy files into `knowledge/` and run
@@ -170,6 +193,9 @@ Most settings come from `.env` (see `config.py` for defaults):
 | `MAX_MESSAGE_CHARS` | `500` | Rejects longer questions. |
 | `MAX_UPLOAD_BYTES` | `10485760` | Upload size limit (10 MB). Files copied directly into `knowledge/` are not limited. |
 | `WARMUP` | `1` | Load the index on startup. |
+| `INGEST_FETCH_URLS` | `1` | `python ingest.py` fetches pages from `urls.txt`; `0` reuses `.cache/urls`. |
+| `EMBED_DELAY_SECONDS` | `1` | Pause between embedding batches during ingest. |
+| `PRODUCTION` | `0` (auto on Render) | Never rebuild at startup; serve the committed index or an "updating" message. |
 | `KNOWLEDGE_DIR`, `CACHE_DIR`, `INDEX_DIR` | paths under `server/` | Override storage locations. |
 
 ## Tests
@@ -182,4 +208,7 @@ No pytest dependency; run the files directly:
 .\.venv\Scripts\python.exe tests\test_keyword.py
 .\.venv\Scripts\python.exe tests\test_safety.py
 .\.venv\Scripts\python.exe tests\test_intent.py
+.\.venv\Scripts\python.exe tests\test_fingerprint.py
+.\.venv\Scripts\python.exe tests\test_encoding.py
+.\.venv\Scripts\python.exe tests\test_urls.py
 ```

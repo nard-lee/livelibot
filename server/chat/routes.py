@@ -6,6 +6,7 @@ from functools import wraps
 from flask import Blueprint, Response, jsonify, request, stream_with_context
 
 import config
+import rag.store as store
 from chat.service import generate_reply, stream_reply
 from llm import LLMConfigError
 from utils.ratelimit import retry_after
@@ -81,6 +82,10 @@ def chat():
     except ValueError as exc:
         return _error(str(exc))
 
+    reason = store.unavailable()
+    if reason:
+        return _error(reason, 503)
+
     try:
         reply, sources = generate_reply(message, history)
     except LLMConfigError as exc:
@@ -105,6 +110,10 @@ def chat_stream():
         message, history = _read_request(data)
     except ValueError as exc:
         return _error(str(exc))
+
+    reason = store.unavailable()
+    if reason:
+        return _error(reason, 503)
 
     def generate():
         try:

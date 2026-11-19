@@ -8,6 +8,7 @@ A leading bare URL in a markdown file is treated as metadata (the source link)
 and removed from the text. All text is sanitised before it reaches the indexer.
 """
 
+import hashlib
 import json
 import logging
 import re
@@ -177,28 +178,61 @@ def load_documents() -> list[dict]:
     return documents
 
 
-def source_files() -> list[list]:
-    """File fingerprints (name, size) used to invalidate the index.
+def _normalise_text(text: str) -> str:
+    """Line endings must not change the fingerprint across checkouts."""
+    return text.replace("\r\n", "\n").replace("\r", "\n")
 
-    mtime is deliberately excluded: Render's build artifact upload does not
-    preserve nanosecond timestamps, so an mtime-based fingerprint would force
-    a full re-embed on every deploy and cold start.
+
+def _digest_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _file_digest(path: Path) -> str | None:
+    """SHA-256 of a knowledge file's content, independent of mtime or host."""
+    try:
+        if path.suffix.lower() == ".pdf":
+            return _digest_bytes(path.read_bytes())
+        text = _normalise_text(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError):
+        return None
+    return _digest_bytes(text.encode("utf-8"))
+
+
+def _web_digest(path: Path) -> str | None:
+    """SHA-256 of a cached page's extracted text (not its fetch timestamp)."""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return _file_digest(path)
+
+    text = payload.get("text") if isinstance(payload, dict) else None
+    if not isinstance(text, str):
+        text = ""
+    return _digest_bytes(_normalise_text(text).encode("utf-8"))
+
+
+def source_files() -> list[list]:
+    """Content fingerprints used to decide whether the committed index is valid.
+
+    Every entry is ``[stable-name, sha256(content)]``: file bytes for knowledge
+    files (text line endings normalised) and extracted text for cached web
+    pages. Sorting and hashing content means any machine produces the same
+    fingerprint for the same sources, unlike mtime- or size-based checks.
     """
     files: list[list] = []
-    for root, suffixes in (
-        (config.KNOWLEDGE_DIR, KNOWLEDGE_SUFFIXES),
-        (config.URL_CACHE_DIR, {".json"}),
+    for label, root, suffixes, digest in (
+        ("knowledge", config.KNOWLEDGE_DIR, KNOWLEDGE_SUFFIXES, _file_digest),
+        ("urls", config.URL_CACHE_DIR, {".json"}, _web_digest),
     ):
         if not root.exists():
             continue
-        for path in sorted(root.iterdir()):
+        for path in sorted(root.iterdir(), key=lambda entry: entry.name):
             if not path.is_file() or path.suffix.lower() not in suffixes:
                 continue
             if path.name == "urls.txt":
                 continue
-            try:
-                stat = path.stat()
-            except OSError:
+            value = digest(path)
+            if value is None:
                 continue
-            files.append([f"{root.name}/{path.name}", stat.st_size])
+            files.append([f"{label}/{path.name}", value])
     return files
