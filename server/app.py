@@ -1,14 +1,16 @@
 import logging
 import threading
+from pathlib import Path
 
 import config
 import rag.store as store
 from chat import chat_bp
 from documents import documents_bp
-from flask import Flask, jsonify, request
+from flask import Flask, abort, jsonify, request, send_from_directory
 from llm import LLMConfigError, describe
 from rag import stats
 from werkzeug.middleware.proxy_fix import ProxyFix
+from werkzeug.utils import safe_join
 
 logging.basicConfig(
     level=logging.INFO,
@@ -16,6 +18,8 @@ logging.basicConfig(
 )
 
 log = logging.getLogger(__name__)
+
+CLIENT_DIST = config.BASE_DIR.parent / "client" / "dist"
 
 app = Flask(__name__)
 # Render terminates TLS in front of the app, so trust its X-Forwarded-For for
@@ -53,6 +57,21 @@ def health():
         logging.getLogger(__name__).exception("index stats failed")
         return jsonify({"status": "degraded", "index": None, **llm_info}), 503
     return jsonify({"status": "ok", "index": index, **llm_info})
+
+
+@app.get("/")
+@app.get("/<path:path>")
+def client(path: str = "index.html"):
+    """Serve the built Vite app; unknown paths fall back to index.html."""
+    if path.startswith("api/"):
+        abort(404)
+    if CLIENT_DIST.is_dir():
+        target = safe_join(str(CLIENT_DIST), path)
+        if target and Path(target).is_file():
+            return send_from_directory(CLIENT_DIST, path)
+        if (CLIENT_DIST / "index.html").is_file():
+            return send_from_directory(CLIENT_DIST, "index.html")
+    abort(404)
 
 
 def _warmup() -> None:

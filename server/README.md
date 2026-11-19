@@ -20,8 +20,11 @@ python ingest.py         # fetch URLs + build the index
 python app.py            # http://127.0.0.1:5001
 ```
 
-The Vite dev server proxies `/api` to port 5001, so run the client separately.
-Manage knowledge from the client's **Library** page (upload, delete, reindex)
+The Vite dev server proxies `/api` to port 5001, so run the client separately
+while developing. Flask also serves the production build: when `client/dist`
+exists, `/` and every non-`/api` path return the Vite app (unknown paths fall
+back to `index.html`); build it with `npm run build` in `client/`. Manage
+knowledge from the client's **Library** page (upload, delete, reindex)
 or with `python ingest.py`. While indexing, the page shows a package-manager style log — files parsed,
 per-document chunk counts, embedding batches, save and completion — plus a
 progress bar and elapsed time, fed by `GET /api/index/progress`. The log stays
@@ -31,14 +34,15 @@ web-page row also has **Fetch / Re-fetch** (re-download and re-index) and delete
 
 ## Deploy on Render (free plan)
 
-Build: `pip install -r requirements.txt && python ingest.py`
-Start: `gunicorn -w 1 --threads 4 -t 120 -b 0.0.0.0:$PORT app:app`
+Build: `pip install -r server/requirements.txt && cd server && python ingest.py && cd ../client && npm ci && npm run build`
+Start: `cd server && gunicorn -w 1 --threads 4 -t 120 -b 0.0.0.0:$PORT app:app`
 
-Set Render's root directory to `server`. Keep `ADMIN_ENABLED=0` so the
-deployed API stays read-only, and set `ALLOWED_ORIGIN` to the deployed
-client's origin. Render provides `PORT`. The build embeds the knowledge base
-through the Gemini API, so `GEMINI_API_KEY` must already be set on the
-service.
+Both commands run from the repo root. `PYTHON_VERSION=3.10.11` pins Python; if
+`npm` is missing on the build host, set `NODE_VERSION` too. Because Flask serves
+`client/dist` at `/`, the API and UI share one origin — leave `ALLOWED_ORIGIN`
+empty (`ADMIN_ENABLED=0` keeps the API read-only). Render provides `PORT`. The
+build embeds the knowledge base through the Gemini API, so `GEMINI_API_KEY`
+must already be set on the service.
 
 ## API
 
