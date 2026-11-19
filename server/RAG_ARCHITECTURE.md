@@ -13,13 +13,13 @@ INGEST (startup / upload / url change / delete)
                         ▼
              rag/chunking.py (heading-aware chunks)
                         ▼
-             rag/embedder.py (fastembed MiniLM, ONNX)
+             rag/embedder.py (Gemini batchEmbedContents)
                         ▼
              .index/vectors.npy + .index/index.json
                   (+ in-memory BM25 over chunks)
 
 QUERY
-  question ──▶ embed ──▶ dense cosine ─┐
+  question ──▶ embed (query) ──▶ dense cosine ─┐
            └─▶ tokenize ─▶ BM25 ───────┤
                                         ▼
                           reciprocal rank fusion (top 20)
@@ -106,13 +106,17 @@ with `RAG_CHUNK_OVERLAP` (default 120) characters of overlap.
 
 ## 3. Embedding (`rag/embedder.py`)
 
-- Model: `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`
-  (`EMBED_MODEL`), multilingual English/Tagalog, executed by `fastembed` (ONNX).
-- The model is cached under `.cache/models` (pinned in-project because the
-  default `%TEMP%` cache forces a ~90 MB re-download).
-- `_model()` is `lru_cache(maxsize=1)`; `embed(texts)` returns plain floats.
-- Query vectors and indexed vectors are L2-normalised, so cosine similarity is a
-  plain dot product.
+- Model: `gemini-embedding-001` (`EMBED_MODEL`), called through the Gemini
+  `batchEmbedContents` endpoint — no local model, no ONNX runtime, so process
+  memory stays small enough for the Render free tier.
+- `embed(texts)` sends batches of 32. Indexed chunks use
+  `taskType = RETRIEVAL_DOCUMENT`; the live question uses `RETRIEVAL_QUERY`
+  (asymmetric embeddings, which is what the task types are for).
+- 429/500/503 are retried twice (5 s, 15 s). Other statuses raise with the
+  status code and a truncated provider message; a missing key raises
+  `LLMConfigError` before any request is sent.
+- The embedder returns raw floats; `rag/index.py` L2-normalises them, so cosine
+  similarity is a plain dot product.
 
 ---
 
@@ -125,7 +129,7 @@ vector matrix, BM25, embedding metadata, fingerprint, build time.
 
 `sha256` over a sorted JSON payload of:
 
-- `INDEX_VERSION` (currently `7`; bump when chunking/format changes),
+- `INDEX_VERSION` (currently `8`; bump when chunking/format changes),
 - `EMBED_MODEL`,
 - chunk settings `[RAG_CHUNK_CHARS, RAG_CHUNK_OVERLAP]`,
 - every source file's `name`, `size`, `mtime_ns`.
@@ -153,9 +157,9 @@ keeps uploads cheap when most of the corpus is unchanged.
 
 ### Warmup (`warm()`)
 
-At startup (daemon thread, `WARMUP=1`): `ensure_index()`, embed a warmup string
-to load the model, and parse documents once so PDF extraction is cached before
-the first user question.
+At startup (daemon thread, `WARMUP=1`): `ensure_index()`, then parse documents
+once so PDF extraction is cached before the first user question. No model is
+loaded — embeddings are remote calls.
 
 ---
 
@@ -283,7 +287,7 @@ loader).
 | `rag/loaders.py` | File/PDF/URL loading, trafilatura extraction, title cleanup |
 | `rag/safety.py` | HTML-comment/injection stripping, `<context>` markers |
 | `rag/chunking.py` | Heading-aware, paragraph/sentence chunking with overlap |
-| `rag/embedder.py` | fastembed model wrapper, project-local model cache |
+| `rag/embedder.py` | Gemini batch embedding client (document + query task types) |
 | `rag/keyword.py` | Tokenizer, BM25, reciprocal rank fusion |
 | `rag/index.py` | Fingerprint, build, vector reuse, atomic persistence, warmup |
 | `rag/search.py` | Hybrid retrieval: fuse → gate → dedupe → rerank → cap |
@@ -298,7 +302,7 @@ loader).
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `EMBED_MODEL` | `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` | Embedding model |
+| `EMBED_MODEL` | `gemini-embedding-001` | Embedding model |
 | `RAG_TOP_K` | `5` | Chunks passed to the model |
 | `RAG_MIN_SCORE` | `0.30` | Dense gate (paired with BM25 gate) |
 | `RAG_CHUNK_CHARS` | `800` | Max chunk size |
@@ -313,11 +317,11 @@ loader).
 | `RAG_RERANK` | `1` | Enable LLM rerank |
 | `RAG_RERANK_CANDIDATES` | `20` | Passages shown to the reranker |
 | `RAG_RERANK_MAX_TOKENS` | `600` | Reranker output budget |
-| `INDEX_VERSION` | `7` | Bump to invalidate on-disk indexes |
+| `INDEX_VERSION` | `8` | Bump to invalidate on-disk indexes |
 | `WARMUP` | `1` | Warm index + model at startup |
 
 Paths default to `server/knowledge`, `server/.cache`, `server/.cache/urls`,
-`server/.index`, `server/.cache/models`.
+`server/.index`.
 
 ---
 

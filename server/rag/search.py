@@ -20,7 +20,7 @@ log = logging.getLogger(__name__)
 
 
 def _query_vector(question: str) -> np.ndarray | None:
-    vector = np.asarray(embed([question])[0], dtype=np.float32)
+    vector = np.asarray(embed([question], task="RETRIEVAL_QUERY")[0], dtype=np.float32)
     norm = float(np.linalg.norm(vector))
     if norm == 0:
         return None

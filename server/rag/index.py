@@ -327,10 +327,9 @@ def rebuild() -> dict:
 
 
 def warm() -> None:
-    """Load the index and embedding model before the first question."""
-    set_progress("warming", "Loading index and model")
+    """Load the index before the first question."""
+    set_progress("warming", "Loading index")
     ensure_index()
-    embed(["warmup"])
 
     # Parse documents once so PDF extraction is cached for later rebuilds.
     try:

@@ -36,7 +36,9 @@ Start: `gunicorn -w 1 --threads 4 -t 120 -b 0.0.0.0:$PORT app:app`
 
 Set Render's root directory to `server`. Keep `ADMIN_ENABLED=0` so the
 deployed API stays read-only, and set `ALLOWED_ORIGIN` to the deployed
-client's origin. Render provides `PORT`.
+client's origin. Render provides `PORT`. The build embeds the knowledge base
+through the Gemini API, so `GEMINI_API_KEY` must already be set on the
+service.
 
 ## API
 
@@ -71,9 +73,9 @@ oversized upload, and `502` when the LLM call fails, all with a JSON `error`.
 3. **Chunking** (`rag/chunking.py`) — paragraph and sentence boundaries, bullet
    lines preserved, markdown headings prepended as a `Section > Subsection`
    breadcrumb. Chunks overlap so facts split across a boundary stay retrievable.
-4. **Embedding** (`rag/embedder.py`) — `fastembed` ONNX model
-   `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`, cached in
-   `.cache/models` (not `%TEMP%`, which gets wiped).
+4. **Embedding** (`rag/embedder.py`) — Gemini's `batchEmbedContents` endpoint
+   (`gemini-embedding-001`), so no local model is loaded and the server stays
+   small enough for a 512 MB instance.
 5. **Index** (`rag/index.py`) — normalised vectors persisted to `.index/`
    (`index.json` + `vectors.npy`) and reloaded on start. A fingerprint of source
    file stats, model name and chunk settings decides whether the cache is valid,
@@ -127,7 +129,7 @@ helpers), so imports elsewhere stay short.
 | `rag/index.py` | Chunk, embed (reusing unchanged vectors), fingerprint, save/load `.index/`, rebuild, warmup. |
 | `rag/search.py` | Hybrid retrieval: dense + BM25 → RRF → dedupe → rerank → per-source cap. |
 | `rag/chunking.py` | Paragraph/sentence-aware chunking with heading breadcrumbs. |
-| `rag/embedder.py` | `fastembed` model wrapper (model cached under `.cache/models`). |
+| `rag/embedder.py` | Gemini embedding client (batched, retries on 429/5xx). |
 | `rag/keyword.py` | Tokeniser, BM25 implementation, reciprocal rank fusion. |
 | `rag/rerank.py` | Optional LLM rerank of fused candidates. |
 | `rag/loaders.py` | File/URL text extraction (trafilatura + pypdf) and title helpers. |
@@ -150,7 +152,7 @@ Most settings come from `.env` (see `config.py` for defaults):
 | `PORT` | `5001` | Flask port. |
 | `ADMIN_ENABLED` | `0` | `0` hides every upload/URL/delete/rebuild route (404). |
 | `ALLOWED_ORIGIN` | — | Only origin allowed to call the API cross-origin; empty = same-origin only. |
-| `EMBED_MODEL` | multilingual MiniLM | `fastembed` model name. |
+| `EMBED_MODEL` | `gemini-embedding-001` | Gemini embedding model id. |
 | `RAG_TOP_K` | `5` | Chunks kept per question. |
 | `RAG_MIN_SCORE` | `0.30` | Minimum cosine similarity. |
 | `RAG_CANDIDATES` | `20` | Candidates passed to the reranker. |
@@ -162,8 +164,8 @@ Most settings come from `.env` (see `config.py` for defaults):
 | `RAG_CHUNK_CHARS` / `RAG_CHUNK_OVERLAP` | `800` / `120` | Chunk size and overlap. |
 | `MAX_MESSAGE_CHARS` | `500` | Rejects longer questions. |
 | `MAX_UPLOAD_BYTES` | `10485760` | Upload size limit (10 MB). Files copied directly into `knowledge/` are not limited. |
-| `WARMUP` | `1` | Warm index + model on startup. |
-| `KNOWLEDGE_DIR`, `CACHE_DIR`, `INDEX_DIR`, `EMBED_CACHE_DIR` | paths under `server/` | Override storage locations. |
+| `WARMUP` | `1` | Load the index on startup. |
+| `KNOWLEDGE_DIR`, `CACHE_DIR`, `INDEX_DIR` | paths under `server/` | Override storage locations. |
 
 ## Tests
 

@@ -10,7 +10,6 @@ KNOWLEDGE_DIR = Path(os.getenv("KNOWLEDGE_DIR") or BASE_DIR / "knowledge")
 CACHE_DIR = Path(os.getenv("CACHE_DIR") or BASE_DIR / ".cache")
 URL_CACHE_DIR = CACHE_DIR / "urls"
 INDEX_DIR = Path(os.getenv("INDEX_DIR") or BASE_DIR / ".index")
-EMBED_CACHE_DIR = Path(os.getenv("EMBED_CACHE_DIR") or CACHE_DIR / "models")
 
 FIELD_NAME = os.getenv("FIELD_NAME", "general topics")
 PORT = int(os.getenv("PORT", "5001"))
@@ -36,9 +35,7 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemma-4-26b-a4b-it").strip()
 
 # Retrieval
-EMBED_MODEL = os.getenv(
-    "EMBED_MODEL", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
-)
+EMBED_MODEL = os.getenv("EMBED_MODEL", "gemini-embedding-001")
 RAG_TOP_K = int(os.getenv("RAG_TOP_K", "5"))
 RAG_MIN_SCORE = float(os.getenv("RAG_MIN_SCORE", "0.30"))
 RAG_CHUNK_CHARS = int(os.getenv("RAG_CHUNK_CHARS", "800"))
