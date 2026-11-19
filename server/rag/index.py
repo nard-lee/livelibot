@@ -23,7 +23,7 @@ from rag.chunking import chunk_text
 from rag.embedder import BATCH_SIZE, embed
 from rag.keyword import BM25
 from rag.progress import log_event, set_progress
-from rag.sources import load_documents, source_files
+from rag.sources import load_documents, source_digests
 
 log = logging.getLogger(__name__)
 
@@ -281,39 +281,90 @@ def _set_index(
 
 # --------------------------------------------------------------- persistence
 
-def _compute_fingerprint() -> str:
+SETTINGS_KEYS = ("INDEX_VERSION", "EMBED_MODEL", "RAG_CHUNK_CHARS", "RAG_CHUNK_OVERLAP")
+
+
+def fingerprint_components() -> dict:
+    """Everything that must match for the committed index to be valid."""
+    return {
+        "INDEX_VERSION": config.INDEX_VERSION,
+        "EMBED_MODEL": config.EMBED_MODEL,
+        "RAG_CHUNK_CHARS": config.RAG_CHUNK_CHARS,
+        "RAG_CHUNK_OVERLAP": config.RAG_CHUNK_OVERLAP,
+        "files": source_digests(),
+    }
+
+
+def compute_fingerprint(components: dict | None = None) -> str:
+    """SHA-256 of the canonical component dict."""
+    components = fingerprint_components() if components is None else components
     payload = json.dumps(
-        {
-            "version": config.INDEX_VERSION,
-            "model": config.EMBED_MODEL,
-            "chunk": [config.RAG_CHUNK_CHARS, config.RAG_CHUNK_OVERLAP],
-            "files": source_files(),
-        },
-        sort_keys=True,
+        components, sort_keys=True, ensure_ascii=False, separators=(",", ":")
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def _load_from_disk(fingerprint: str) -> bool:
+def _describe_mismatch(stored, current: dict) -> str:
+    """One-line list of differing components; never includes file contents."""
+    if not isinstance(stored, dict):
+        return "stored components are missing (older index format)"
+
+    parts: list[str] = []
+
+    stored_files = stored.get("files")
+    stored_files = stored_files if isinstance(stored_files, dict) else {}
+    current_files = current.get("files") or {}
+    changed = sorted(
+        name
+        for name in set(stored_files) | set(current_files)
+        if stored_files.get(name) != current_files.get(name)
+    )
+    if changed:
+        parts.append("files changed: " + ", ".join(changed))
+
+    settings = [key for key in SETTINGS_KEYS if stored.get(key) != current.get(key)]
+    if settings:
+        parts.append("settings changed: " + ", ".join(settings))
+
+    return "; ".join(parts) or "fingerprint format changed"
+
+
+def _load_from_disk(fingerprint: str, components: dict) -> bool:
     try:
         meta = json.loads(INDEX_PATH.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
+        log.error("index unavailable: could not read %s", INDEX_PATH.name)
         return False
 
-    if meta.get("fingerprint") != fingerprint or meta.get("version") != config.INDEX_VERSION:
+    stored = meta.get("fingerprint_components")
+    if (
+        meta.get("fingerprint") != fingerprint
+        or meta.get("version") != config.INDEX_VERSION
+        or stored != components
+    ):
+        log.error(
+            "index fingerprint mismatch: %s", _describe_mismatch(stored, components)
+        )
         return False
 
     items = meta.get("items") or []
     if not items:
+        log.error("index unavailable: %s has no chunks", INDEX_PATH.name)
         return False
 
     try:
         vectors = np.load(VECTORS_PATH)
     except (OSError, ValueError) as exc:
-        log.warning("could not read cached vectors: %s", exc)
+        log.error("index unavailable: could not read %s: %s", VECTORS_PATH.name, exc)
         return False
 
     if vectors.ndim != 2 or vectors.shape[0] != len(items):
+        log.error(
+            "index unavailable: %s has %d row(s) for %d chunk(s)",
+            VECTORS_PATH.name,
+            vectors.shape[0] if vectors.ndim else 0,
+            len(items),
+        )
         return False
 
     _set_index(
@@ -325,7 +376,9 @@ def _load_from_disk(fingerprint: str) -> bool:
     return True
 
 
-def _save_to_disk(fingerprint: str, items: list[dict], vectors: np.ndarray) -> None:
+def _save_to_disk(
+    fingerprint: str, components: dict, items: list[dict], vectors: np.ndarray
+) -> None:
     try:
         config.INDEX_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -337,6 +390,7 @@ def _save_to_disk(fingerprint: str, items: list[dict], vectors: np.ndarray) -> N
         meta = {
             "version": config.INDEX_VERSION,
             "fingerprint": fingerprint,
+            "fingerprint_components": components,
             "model": config.EMBED_MODEL,
             "chunk_chars": config.RAG_CHUNK_CHARS,
             "chunk_overlap": config.RAG_CHUNK_OVERLAP,
@@ -353,7 +407,7 @@ def _save_to_disk(fingerprint: str, items: list[dict], vectors: np.ndarray) -> N
 
 # ------------------------------------------------------------------ lifecycle
 
-def _rebuild(fingerprint: str) -> None:
+def _rebuild(fingerprint: str, components: dict) -> None:
     global _fingerprint, _unavailable
 
     try:
@@ -375,7 +429,7 @@ def _rebuild(fingerprint: str) -> None:
                 len(items),
                 len(items),
             )
-            _save_to_disk(fingerprint, items, vectors)
+            _save_to_disk(fingerprint, components, items, vectors)
 
         _set_index(
             items,
@@ -390,42 +444,43 @@ def _rebuild(fingerprint: str) -> None:
             len(items),
             len(items),
         )
-        log.info("built index: %d chunks from %d files", len(items), len(source_files()))
+        log.info(
+            "built index: %d chunks from %d files",
+            len(items),
+            len(components.get("files") or {}),
+        )
     except Exception as exc:
         set_progress("error", f"{type(exc).__name__}: {exc}")
         raise
 
 
 def ensure_index(force: bool = False) -> None:
-    """Load a valid on-disk index or rebuild from sources when stale.
+    """Load the committed index; never rebuild or embed at startup.
 
-    In production a stale index is never rebuilt at startup: rebuilding costs
-    embedding quota and can fail on a deploy. The app serves UPDATING_MESSAGE
-    until the committed index matches again.
+    A fingerprint mismatch leaves the app serving UPDATING_MESSAGE and logs
+    exactly which components differ. Rebuild explicitly with ``python
+    ingest.py`` (or ``force=True`` from an admin upload/delete).
     """
     global _fingerprint, _unavailable
 
     with _LOCK:
-        fingerprint = _compute_fingerprint()
+        components = fingerprint_components()
+        fingerprint = compute_fingerprint(components)
         if not force and fingerprint == _fingerprint:
             return
-        if not force and _load_from_disk(fingerprint):
+        if not force and _load_from_disk(fingerprint, components):
             _fingerprint = fingerprint
             _unavailable = None
             set_progress("idle")
             return
-        if not force and config.PRODUCTION:
+        if not force:
             _fingerprint = fingerprint
             _unavailable = UPDATING_MESSAGE
-            log.error(
-                "committed index does not match the sources; serving "
-                "'knowledge base is being updated' instead of rebuilding"
-            )
             set_progress("idle")
             return
         _unavailable = None
-        log.info("building index: no valid on-disk index")
-        _rebuild(fingerprint)
+        log.info("rebuilding index (explicit request)")
+        _rebuild(fingerprint, components)
 
 
 def rebuild() -> dict:

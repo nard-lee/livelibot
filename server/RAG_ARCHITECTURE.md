@@ -130,26 +130,33 @@ vector matrix, BM25, embedding metadata, fingerprint, build time.
 
 ### Fingerprint
 
-`sha256` over a sorted JSON payload of:
+The fingerprint is a **component dict**, hashed with `sha256` over canonical
+JSON and stored next to its components in `index.json`:
 
 - `INDEX_VERSION` (currently `9`; bump when chunking/format changes),
 - `EMBED_MODEL`,
-- chunk settings `[RAG_CHUNK_CHARS, RAG_CHUNK_OVERLAP]`,
-- every source file's stable name and `sha256(content)`. Knowledge text files
-  hash their UTF-8 content with line endings normalised (`\r\n` → `\n`), PDFs
-  hash their bytes, and cached web pages hash their extracted `text` — never
-  `fetched_at`, title, `mtime` or size, so the same content yields the same
-  fingerprint on any machine and checkout.
+- `RAG_CHUNK_CHARS` and `RAG_CHUNK_OVERLAP`,
+- `files`: one `sha256(content)` per source, keyed by relative path
+  (`knowledge/x.md`, `.cache/urls/<id>.json`). Text files hash their UTF-8
+  content with `\r\n` normalised to `\n`, PDFs hash their bytes, and cached web
+  pages hash their extracted `text` — never `fetched_at`, title, `mtime` or
+  size.
 
 `ensure_index()`:
 
-1. Recompute the fingerprint; if it matches the in-memory one, return.
-2. Try loading `.index/` from disk (fingerprint and version must match, vector
-   row count must match item count).
-3. In production (`PRODUCTION=1`, automatically set by Render), stop here with
-   one error log line and serve "The knowledge base is being updated" — never
-   rebuild and never call the embedding API at startup.
-4. Otherwise rebuild: read sources → chunk → embed → save.
+1. Recompute the components and fingerprint; if it matches the in-memory one,
+   return.
+2. Try loading `.index/` from disk (fingerprint, version and component dict
+   must match; vector row count must match item count).
+3. On mismatch, log **one** line naming the differing components (for example
+   `files changed: knowledge/x.md; settings changed: EMBED_MODEL`) and serve
+   "The knowledge base is being updated". Startup never rebuilds and never
+   calls the embedding API.
+4. Only an explicit rebuild (`python ingest.py`, or an admin upload/delete with
+   `force=True`) reads sources → chunks → embeds → saves.
+
+`python fingerprint_check.py [--json]` prints the current components plus the
+committed fingerprint, so a local checkout and Render can be compared.
 
 ### Vector reuse
 
@@ -163,8 +170,9 @@ its progress and the next run resumes from that point instead of re-embedding.
 
 - `.index/index.json` and `.index/vectors.npy` are committed to git, so a fresh
   clone loads them without calling the embedding API.
-- `.index/index.json`: metadata plus all chunk items
-  (`source_id`, `title`, `url`, `content`) and a UTC `built_at`.
+- `.index/index.json`: metadata, the `fingerprint_components` dict, the
+  `fingerprint` hash, plus all chunk items (`source_id`, `title`, `url`,
+  `content`) and a UTC `built_at`.
 - `.index/vectors.npy`: normalized `float32` matrix.
 - `.index/partial.npz`: git-ignored progress file for interrupted ingests.
 - Writes go to pid-suffixed temp files and `os.replace` them into place, so the
@@ -175,8 +183,8 @@ its progress and the next run resumes from that point instead of re-embedding.
 At startup (daemon thread, `WARMUP=1`): `ensure_index()`, then parse documents
 once so PDF extraction is cached before the first user question. No model is
 loaded — embeddings are remote calls. A matching committed index is loaded, so
-no embedding request is made; a stale production index yields the "updating"
-message instead of a rebuild.
+no embedding request is made; any mismatch yields the "updating" message and a
+one-line component diff instead of a rebuild.
 
 ---
 
@@ -338,7 +346,6 @@ loader).
 | `WARMUP` | `1` | Warm index + model at startup |
 | `INGEST_FETCH_URLS` | `1` | Fetch `urls.txt`; `0` reuses `.cache/urls` |
 | `EMBED_DELAY_SECONDS` | `1` | Pause between embedding batches |
-| `PRODUCTION` | `0` (auto on Render) | Never rebuild at startup |
 
 Paths default to `server/knowledge`, `server/.cache`, `server/.cache/urls`,
 `server/.index`.
@@ -349,14 +356,15 @@ Paths default to `server/knowledge`, `server/.cache`, `server/.cache/urls`,
 
 - **Vectors are always L2-normalized**; never persist unnormalized rows, or
   cosine becomes a magnitude contest.
-- **The fingerprint is the only staleness signal.** Changing a source file's
-  content, name, the embedding model, or the chunk sizes rebuilds; bump
+- **The fingerprint is the only staleness signal.** It is stored as a component
+  dict so a mismatch names the exact settings or files that differ; bump
   `INDEX_VERSION` for chunking/format changes. Content hashing (SHA-256) means
   same-size edits and line-ending changes are handled correctly, and the index
   built on one machine matches a clone on another.
 - **The index is a build artifact committed to git.** Rebuild locally with
-  `python ingest.py`, then `git add .index .cache/urls && git commit`. Deploys
-  never embed; a stale production index serves an "updating" message.
+  `python ingest.py`, then `git add .index .cache/urls && git commit`. Startup
+  never rebuilds or embeds; a mismatch serves an "updating" message and logs one
+  component diff line. Use `fingerprint_check.py` to compare machines.
 - **Writes are atomic** (`os.replace` from a pid-suffixed temp file) because the
   API server and `ingest.py` can build concurrently. Interrupted ingests resume
   from the atomically written `.index/partial.npz`.

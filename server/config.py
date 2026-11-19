@@ -68,12 +68,8 @@ INGEST_FETCH_URLS = os.getenv("INGEST_FETCH_URLS", "1").lower() in {"1", "true",
 # Pause between embedding batches so the per-minute quota is not exhausted.
 EMBED_DELAY_SECONDS = float(os.getenv("EMBED_DELAY_SECONDS", "1"))
 
-# Production never rebuilds the index at startup: if the committed index does
-# not match the sources, the app serves an "updating" message instead of
-# spending embedding quota or crashing. Render sets RENDER=true.
-PRODUCTION = os.getenv("PRODUCTION", "0").lower() in {"1", "true", "yes"} or (
-    os.getenv("RENDER", "").lower() in {"1", "true", "yes"}
-)
+# Startup never rebuilds the index: it loads the committed one or serves an
+# "updating" message. Rebuild explicitly with `python ingest.py`.
 
 # Bump whenever the on-disk index format or chunking output changes, so stale
 # indexes are rebuilt instead of silently reused.

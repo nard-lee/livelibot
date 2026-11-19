@@ -48,10 +48,12 @@ share one origin — leave `ALLOWED_ORIGIN` empty (`ADMIN_ENABLED=0` keeps the A
 read-only). Render provides `PORT`. `GEMINI_API_KEY` is needed at runtime for
 answers, not at build time.
 
-At startup a production instance loads the committed index when its
-fingerprint matches the sources. If it does not match, the instance prints one
-error line and answers with "The knowledge base is being updated" instead of
-rebuilding (and spending embedding quota). Rebuild + commit locally to fix it.
+At startup the app loads the committed index when its fingerprint matches the
+sources. If it does not match, it logs one line naming the differing components
+(for example `files changed: knowledge/x.md; settings changed: EMBED_MODEL`) and
+answers with "The knowledge base is being updated" — it never rebuilds or calls
+the embedding API at startup. To compare a local checkout with Render, run
+`python fingerprint_check.py` (or `--json`) in `server/`.
 
 ## API
 
@@ -91,14 +93,14 @@ oversized upload, and `502` when the LLM call fails, all with a JSON `error`.
    small enough for a 512 MB instance.
 5. **Index** (`rag/index.py`) — normalised vectors persisted to `.index/`
    (`index.json` + `vectors.npy`) and reloaded on start. The index is committed
-   so a fresh clone and the Render build work offline. A fingerprint of each
-   source's SHA-256 content (line endings normalised; cached web pages hash
-   their extracted text, not their fetch time), plus model name and chunk
-   settings, decides whether the cache is valid. Any machine computes the same
-   fingerprint for the same content, so adding, editing or removing a document
-   triggers a rebuild on the next start. Set `INDEX_VERSION` in `config.py` when
-   chunking or index format changes. Startup warms the index (documents parsed
-   once) in a background thread; in production a stale index is reported as
+   so a fresh clone and the Render build work offline. The fingerprint is a
+   component dict — `INDEX_VERSION`, `EMBED_MODEL`, chunk settings, and one
+   SHA-256 per source keyed by relative path (line endings normalised; cached
+   web pages hash their extracted text, not their fetch time). Both the
+   fingerprint hash and its component dict are stored in `index.json`, so a
+   mismatch names exactly which settings or files differ. Set `INDEX_VERSION`
+   in `config.py` when chunking or index format changes. Startup warms the index
+   (documents parsed once) in a background thread; a stale index is reported as
    "updating" instead of rebuilt.
 6. **Retrieval** (`rag/search.py`) — dense cosine and BM25 scores are fused with
    reciprocal rank fusion, near-duplicate chunks are dropped, candidates above
@@ -138,6 +140,13 @@ Delete `.index/` to force a cold rebuild. Interrupted runs keep every finished
 embedding batch in `.index/partial.npz` (git-ignored); rerunning continues from
 that point. `EMBED_DELAY_SECONDS` controls the pause between batches.
 
+To see why a committed index is rejected, run:
+
+```powershell
+python fingerprint_check.py        # components + committed fingerprint
+python fingerprint_check.py --json # same, easy to diff between machines
+```
+
 Uploads through the API are capped by `MAX_UPLOAD_BYTES` (10 MB by default).
 Local ingestion has **no size cap**: copy files into `knowledge/` and run
 `python ingest.py`; indexing time then scales with text volume (~80 chunks/s
@@ -153,7 +162,7 @@ helpers), so imports elsewhere stay short.
 | --- | --- |
 | `rag/store.py` | Facade: re-exports the pipeline (`from rag import search, stats, rebuild, warm`). |
 | `rag/progress.py` | Indexing stage + rolling log used by `GET /api/index/progress` and the Library panel. |
-| `rag/sources.py` | Read `knowledge/` files and cached web pages into `{id, title, url, text}`; PDF text cache; source fingerprints. |
+| `rag/sources.py` | Read `knowledge/` files and cached web pages into `{id, title, url, text}`; PDF text cache; per-source content digests. |
 | `rag/index.py` | Chunk, embed (reusing unchanged vectors), fingerprint, save/load `.index/`, rebuild, warmup. |
 | `rag/search.py` | Hybrid retrieval: dense + BM25 → RRF → dedupe → rerank → per-source cap. |
 | `rag/chunking.py` | Paragraph/sentence-aware chunking with heading breadcrumbs. |
@@ -195,7 +204,6 @@ Most settings come from `.env` (see `config.py` for defaults):
 | `WARMUP` | `1` | Load the index on startup. |
 | `INGEST_FETCH_URLS` | `1` | `python ingest.py` fetches pages from `urls.txt`; `0` reuses `.cache/urls`. |
 | `EMBED_DELAY_SECONDS` | `1` | Pause between embedding batches during ingest. |
-| `PRODUCTION` | `0` (auto on Render) | Never rebuild at startup; serve the committed index or an "updating" message. |
 | `KNOWLEDGE_DIR`, `CACHE_DIR`, `INDEX_DIR` | paths under `server/` | Override storage locations. |
 
 ## Tests

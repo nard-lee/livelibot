@@ -180,11 +180,20 @@ def load_documents() -> list[dict]:
 
 def _normalise_text(text: str) -> str:
     """Line endings must not change the fingerprint across checkouts."""
-    return text.replace("\r\n", "\n").replace("\r", "\n")
+    return text.replace("\r\n", "\n")
 
 
 def _digest_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def _relative_name(path: Path, root: Path) -> str:
+    """Stable key for the fingerprint, e.g. ``knowledge/permit.md``."""
+    try:
+        return path.relative_to(config.BASE_DIR).as_posix()
+    except ValueError:
+        # Custom KNOWLEDGE_DIR/CACHE_DIR outside the server folder (tests).
+        return f"{root.name}/{path.name}"
 
 
 def _file_digest(path: Path) -> str | None:
@@ -211,18 +220,18 @@ def _web_digest(path: Path) -> str | None:
     return _digest_bytes(_normalise_text(text).encode("utf-8"))
 
 
-def source_files() -> list[list]:
-    """Content fingerprints used to decide whether the committed index is valid.
+def source_digests() -> dict[str, str]:
+    """SHA-256 per source, keyed by a stable relative path.
 
-    Every entry is ``[stable-name, sha256(content)]``: file bytes for knowledge
-    files (text line endings normalised) and extracted text for cached web
-    pages. Sorting and hashing content means any machine produces the same
-    fingerprint for the same sources, unlike mtime- or size-based checks.
+    Text files hash their UTF-8 content with ``\\r\\n`` normalised to ``\\n``;
+    PDFs hash their bytes; cached pages hash their extracted text. No mtime,
+    size or fetch time is used, so the same sources produce the same digests on
+    any machine and checkout.
     """
-    files: list[list] = []
-    for label, root, suffixes, digest in (
-        ("knowledge", config.KNOWLEDGE_DIR, KNOWLEDGE_SUFFIXES, _file_digest),
-        ("urls", config.URL_CACHE_DIR, {".json"}, _web_digest),
+    digests: dict[str, str] = {}
+    for root, suffixes, digest in (
+        (config.KNOWLEDGE_DIR, KNOWLEDGE_SUFFIXES, _file_digest),
+        (config.URL_CACHE_DIR, {".json"}, _web_digest),
     ):
         if not root.exists():
             continue
@@ -234,5 +243,5 @@ def source_files() -> list[list]:
             value = digest(path)
             if value is None:
                 continue
-            files.append([f"{label}/{path.name}", value])
-    return files
+            digests[_relative_name(path, root)] = value
+    return digests

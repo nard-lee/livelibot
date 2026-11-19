@@ -61,8 +61,8 @@ def test_index_round_trips():
         index.INDEX_PATH = Path(tmp) / "index.json"
         index.VECTORS_PATH = Path(tmp) / "vectors.npy"
         try:
-            index._save_to_disk("encoding-test", items, vectors)
-            assert index._load_from_disk("encoding-test")
+            index._save_to_disk("encoding-test", {}, items, vectors)
+            assert index._load_from_disk("encoding-test", {})
             loaded, _ = index.get_index()
         finally:
             config.INDEX_DIR = saved_dir
