@@ -112,9 +112,12 @@ with `RAG_CHUNK_OVERLAP` (default 120) characters of overlap.
 - `embed(texts)` sends batches of 32. Indexed chunks use
   `taskType = RETRIEVAL_DOCUMENT`; the live question uses `RETRIEVAL_QUERY`
   (asymmetric embeddings, which is what the task types are for).
-- 429/500/503 are retried twice (5 s, 15 s). Other statuses raise with the
-  status code and a truncated provider message; a missing key raises
-  `LLMConfigError` before any request is sent.
+- 429/500/503 are retried with backoff (5 s, 20 s, 60 s), extended to the
+  provider's `retryDelay` / `Retry-After` when present — the free-tier
+  embedding quota is per minute, so short retries just burn the window. After
+  the last attempt the error names the status and the provider message. Other
+  statuses fail immediately; a missing key raises `LLMConfigError` before any
+  request is sent.
 - The embedder returns raw floats; `rag/index.py` L2-normalises them, so cosine
   similarity is a plain dot product.
 
