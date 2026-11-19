@@ -5,9 +5,10 @@ import config
 import rag.store as store
 from chat import chat_bp
 from documents import documents_bp
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 from llm import LLMConfigError, describe
 from rag import stats
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 logging.basicConfig(
     level=logging.INFO,
@@ -17,17 +18,20 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 app = Flask(__name__)
+# Render terminates TLS in front of the app, so trust its X-Forwarded-For for
+# the per-IP rate limit.
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1)
 app.register_blueprint(chat_bp, url_prefix="/api")
 app.register_blueprint(documents_bp, url_prefix="/api")
 
 
 @app.after_request
 def add_cors_headers(response):
-    # The Vite dev server proxies /api, but a deployed client may call this
-    # origin directly, so honour CLIENT_ORIGIN from the environment.
-    response.headers["Access-Control-Allow-Origin"] = config.CLIENT_ORIGIN
-    response.headers["Access-Control-Allow-Headers"] = "Content-Type"
-    response.headers["Access-Control-Allow-Methods"] = "GET, POST, DELETE, OPTIONS"
+    if config.ALLOWED_ORIGIN and request.headers.get("Origin") == config.ALLOWED_ORIGIN:
+        response.headers["Access-Control-Allow-Origin"] = config.ALLOWED_ORIGIN
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, DELETE, OPTIONS"
+        response.headers["Vary"] = "Origin"
     return response
 
 
@@ -63,6 +67,4 @@ if config.WARMUP:
 
 
 if __name__ == "__main__":
-    # The Flask debug reloader leaks processes on Windows (the old server keeps
-    # the port open via SO_REUSEADDR), so it is opt-in through DEBUG=1.
-    app.run(debug=config.DEBUG, port=config.PORT)
+    app.run(port=config.PORT, debug=False)

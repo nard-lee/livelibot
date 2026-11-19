@@ -1,11 +1,14 @@
 import json
 import logging
+import math
+from functools import wraps
 
 from flask import Blueprint, Response, jsonify, request, stream_with_context
 
 import config
 from chat.service import generate_reply, stream_reply
 from llm import LLMConfigError
+from utils.ratelimit import retry_after
 
 log = logging.getLogger(__name__)
 
@@ -37,7 +40,8 @@ def _read_request(data: dict) -> tuple[str, list[dict]]:
         raise ValueError("message is required")
     if len(message) > config.MAX_MESSAGE_CHARS:
         raise ValueError(
-            f"message is too long (max {config.MAX_MESSAGE_CHARS} characters)"
+            "That question is a bit long — please keep it under "
+            f"{config.MAX_MESSAGE_CHARS} characters so I can focus on what matters."
         )
     return message, _parse_history(data.get("history"))
 
@@ -46,7 +50,30 @@ def _error(message: str, status: int = 400):
     return jsonify({"error": message}), status
 
 
+def rate_limited(view):
+    @wraps(view)
+    def wrapper(*args, **kwargs):
+        wait = retry_after()
+        if wait is None:
+            return view(*args, **kwargs)
+
+        response = jsonify(
+            {
+                "error": (
+                    "You're asking questions a bit quickly — "
+                    "please wait a minute and try again."
+                )
+            }
+        )
+        response.status_code = 429
+        response.headers["Retry-After"] = str(max(1, math.ceil(wait)))
+        return response
+
+    return wrapper
+
+
 @chat_bp.post("/chat")
+@rate_limited
 def chat():
     data = request.get_json(silent=True) or {}
     try:
@@ -71,6 +98,7 @@ def _sse(event: str, data: dict) -> str:
 
 
 @chat_bp.post("/chat/stream")
+@rate_limited
 def chat_stream():
     data = request.get_json(silent=True) or {}
     try:

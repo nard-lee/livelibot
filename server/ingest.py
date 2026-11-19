@@ -53,6 +53,10 @@ def main(argv: list[str] | None = None) -> int:
         index["dimensions"],
         index["built_at"],
     )
+    print(
+        f"Index ready: {index['chunks']} chunk(s) from {index['documents']} "
+        f"document(s), {index['dimensions']} dim(s)"
+    )
     return 0
 
 

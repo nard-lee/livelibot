@@ -29,6 +29,15 @@ visible after the run finishes (until dismissed) and the panel offers
 **Upload another**, **Add another**, **Retry**, and **Dismiss** actions. Each
 web-page row also has **Fetch / Re-fetch** (re-download and re-index) and delete.
 
+## Deploy on Render (free plan)
+
+Build: `pip install -r requirements.txt && python ingest.py`
+Start: `gunicorn -w 1 --threads 4 -t 120 -b 0.0.0.0:$PORT app:app`
+
+Set Render's root directory to `server`. Keep `ADMIN_ENABLED=0` so the
+deployed API stays read-only, and set `ALLOWED_ORIGIN` to the deployed
+client's origin. Render provides `PORT`.
+
 ## API
 
 | Route | Purpose |
@@ -139,8 +148,8 @@ Most settings come from `.env` (see `config.py` for defaults):
 | `TEMPERATURE` | `0.2` | Sampling temperature. |
 | `HISTORY_MESSAGES` | `6` | Prior turns sent to the model. |
 | `PORT` | `5001` | Flask port. |
-| `DEBUG` | `0` | Set to `1` for Flask debug + reloader (leaks processes on Windows). |
-| `CLIENT_ORIGIN` | `*` | `Access-Control-Allow-Origin`. |
+| `ADMIN_ENABLED` | `0` | `0` hides every upload/URL/delete/rebuild route (404). |
+| `ALLOWED_ORIGIN` | — | Only origin allowed to call the API cross-origin; empty = same-origin only. |
 | `EMBED_MODEL` | multilingual MiniLM | `fastembed` model name. |
 | `RAG_TOP_K` | `5` | Chunks kept per question. |
 | `RAG_MIN_SCORE` | `0.30` | Minimum cosine similarity. |
@@ -151,7 +160,7 @@ Most settings come from `.env` (see `config.py` for defaults):
 | `RAG_RERANK_MODEL` | `openai/gpt-oss-20b` | Reranker model (fast). |
 | `RAG_RERANK_EFFORT` | `low` | Reasoning effort for the reranker. |
 | `RAG_CHUNK_CHARS` / `RAG_CHUNK_OVERLAP` | `800` / `120` | Chunk size and overlap. |
-| `MAX_MESSAGE_CHARS` | `2000` | Rejects longer questions. |
+| `MAX_MESSAGE_CHARS` | `500` | Rejects longer questions. |
 | `MAX_UPLOAD_BYTES` | `10485760` | Upload size limit (10 MB). Files copied directly into `knowledge/` are not limited. |
 | `WARMUP` | `1` | Warm index + model on startup. |
 | `KNOWLEDGE_DIR`, `CACHE_DIR`, `INDEX_DIR`, `EMBED_CACHE_DIR` | paths under `server/` | Override storage locations. |

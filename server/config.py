@@ -13,9 +13,13 @@ INDEX_DIR = Path(os.getenv("INDEX_DIR") or BASE_DIR / ".index")
 EMBED_CACHE_DIR = Path(os.getenv("EMBED_CACHE_DIR") or CACHE_DIR / "models")
 
 FIELD_NAME = os.getenv("FIELD_NAME", "general topics")
-CLIENT_ORIGIN = os.getenv("CLIENT_ORIGIN", "*")
 PORT = int(os.getenv("PORT", "5001"))
-DEBUG = os.getenv("DEBUG", "0").lower() in {"1", "true", "yes"}
+
+# Public hosting: the API is read-only unless admin routes are explicitly enabled.
+ADMIN_ENABLED = os.getenv("ADMIN_ENABLED", "0").lower() in {"1", "true", "yes"}
+
+# Only this origin may call the API cross-origin; empty means same-origin only.
+ALLOWED_ORIGIN = os.getenv("ALLOWED_ORIGIN", "").strip()
 
 PERSONA = os.getenv("PERSONA", "").strip()
 AUDIENCE = os.getenv("AUDIENCE", "").strip()
@@ -40,7 +44,7 @@ RAG_MIN_SCORE = float(os.getenv("RAG_MIN_SCORE", "0.30"))
 RAG_CHUNK_CHARS = int(os.getenv("RAG_CHUNK_CHARS", "800"))
 RAG_CHUNK_OVERLAP = int(os.getenv("RAG_CHUNK_OVERLAP", "120"))
 RAG_SNIPPET_CHARS = int(os.getenv("RAG_SNIPPET_CHARS", "200"))
-MAX_MESSAGE_CHARS = int(os.getenv("MAX_MESSAGE_CHARS", "2000"))
+MAX_MESSAGE_CHARS = int(os.getenv("MAX_MESSAGE_CHARS", "500"))
 
 # Hybrid retrieval: dense embeddings fused with BM25 through reciprocal rank fusion.
 RAG_CANDIDATES = int(os.getenv("RAG_CANDIDATES", "20"))

@@ -21,6 +21,15 @@ log = logging.getLogger(__name__)
 
 documents_bp = Blueprint("documents", __name__)
 
+
+@documents_bp.before_request
+def block_writes_when_public():
+    """Hide every mutating route unless ADMIN_ENABLED is on."""
+    if config.ADMIN_ENABLED or request.method in ("GET", "HEAD", "OPTIONS"):
+        return None
+    return jsonify({"error": "not found"}), 404
+
+
 TEXT_SUFFIXES = {".md", ".markdown", ".txt"}
 PDF_SUFFIXES = {".pdf"}
 ALLOWED_SUFFIXES = TEXT_SUFFIXES | PDF_SUFFIXES
