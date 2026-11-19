@@ -132,10 +132,13 @@ vector matrix, BM25, embedding metadata, fingerprint, build time.
 
 `sha256` over a sorted JSON payload of:
 
-- `INDEX_VERSION` (currently `8`; bump when chunking/format changes),
+- `INDEX_VERSION` (currently `9`; bump when chunking/format changes),
 - `EMBED_MODEL`,
 - chunk settings `[RAG_CHUNK_CHARS, RAG_CHUNK_OVERLAP]`,
-- every source file's `name`, `size`, `mtime_ns`.
+- every source file's `name` and `size`. `mtime` is deliberately excluded:
+  Render's build artifact upload does not preserve nanosecond timestamps, so an
+  mtime-based fingerprint would force a full re-embed on every deploy and cold
+  start.
 
 `ensure_index()`:
 
@@ -320,7 +323,7 @@ loader).
 | `RAG_RERANK` | `1` | Enable LLM rerank |
 | `RAG_RERANK_CANDIDATES` | `20` | Passages shown to the reranker |
 | `RAG_RERANK_MAX_TOKENS` | `600` | Reranker output budget |
-| `INDEX_VERSION` | `8` | Bump to invalidate on-disk indexes |
+| `INDEX_VERSION` | `9` | Bump to invalidate on-disk indexes |
 | `WARMUP` | `1` | Warm index + model at startup |
 
 Paths default to `server/knowledge`, `server/.cache`, `server/.cache/urls`,
@@ -332,9 +335,10 @@ Paths default to `server/knowledge`, `server/.cache`, `server/.cache/urls`,
 
 - **Vectors are always L2-normalized**; never persist unnormalized rows, or
   cosine becomes a magnitude contest.
-- **The fingerprint is the only staleness signal.** Editing a source file,
-  changing the embedding model, or changing chunk sizes rebuilds; bump
-  `INDEX_VERSION` for chunking/format changes.
+- **The fingerprint is the only staleness signal.** Changing a source file's
+  name or size, the embedding model, or the chunk sizes rebuilds; bump
+  `INDEX_VERSION` for chunking/format changes. A same-size edit is not detected
+  — run `python ingest.py`, which forces a rebuild.
 - **Writes are atomic** (`os.replace` from a pid-suffixed temp file) because the
   API server and `ingest.py` can build concurrently.
 - **The per-source cap runs last**, after rerank, so one long document cannot

@@ -64,4 +64,4 @@ MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(10 * 1024 * 1024)))
 
 # Bump whenever the on-disk index format or chunking output changes, so stale
 # indexes are rebuilt instead of silently reused.
-INDEX_VERSION = 8
+INDEX_VERSION = 9

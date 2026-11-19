@@ -178,7 +178,12 @@ def load_documents() -> list[dict]:
 
 
 def source_files() -> list[list]:
-    """File fingerprints (name, size, mtime) used to invalidate the index."""
+    """File fingerprints (name, size) used to invalidate the index.
+
+    mtime is deliberately excluded: Render's build artifact upload does not
+    preserve nanosecond timestamps, so an mtime-based fingerprint would force
+    a full re-embed on every deploy and cold start.
+    """
     files: list[list] = []
     for root, suffixes in (
         (config.KNOWLEDGE_DIR, KNOWLEDGE_SUFFIXES),
@@ -195,5 +200,5 @@ def source_files() -> list[list]:
                 stat = path.stat()
             except OSError:
                 continue
-            files.append([f"{root.name}/{path.name}", stat.st_size, stat.st_mtime_ns])
+            files.append([f"{root.name}/{path.name}", stat.st_size])
     return files

@@ -78,10 +78,11 @@ oversized upload, and `502` when the LLM call fails, all with a JSON `error`.
    small enough for a 512 MB instance.
 5. **Index** (`rag/index.py`) — normalised vectors persisted to `.index/`
    (`index.json` + `vectors.npy`) and reloaded on start. A fingerprint of source
-   file stats, model name and chunk settings decides whether the cache is valid,
-   so editing a document triggers a rebuild on the next request. Set
-   `INDEX_VERSION` in `config.py` when chunking or index format changes.
-   Startup warms the index and embedding model in a background thread.
+   file names and sizes, model name and chunk settings decides whether the cache
+   is valid, so adding, removing or resizing a document triggers a rebuild on
+   the next start. Set `INDEX_VERSION` in `config.py` when chunking or index
+   format changes. Startup warms the index (documents parsed once) in a
+   background thread.
 6. **Retrieval** (`rag/search.py`) — dense cosine and BM25 scores are fused with
    reciprocal rank fusion, near-duplicate chunks are dropped, candidates above
    the score floor are reranked by the generation model, and at most

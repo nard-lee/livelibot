@@ -317,6 +317,7 @@ def ensure_index(force: bool = False) -> None:
             _fingerprint = fingerprint
             set_progress("idle")
             return
+        log.info("building index: no valid on-disk index")
         _rebuild(fingerprint)
 
 
