@@ -8,7 +8,6 @@ A leading bare URL in a markdown file is treated as metadata (the source link)
 and removed from the text. All text is sanitised before it reaches the indexer.
 """
 
-import hashlib
 import json
 import logging
 import re
@@ -178,70 +177,23 @@ def load_documents() -> list[dict]:
     return documents
 
 
-def _normalise_text(text: str) -> str:
-    """Line endings must not change the fingerprint across checkouts."""
-    return text.replace("\r\n", "\n")
-
-
-def _digest_bytes(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
-
-
-def _relative_name(path: Path, root: Path) -> str:
-    """Stable key for the fingerprint, e.g. ``knowledge/permit.md``."""
-    try:
-        return path.relative_to(config.BASE_DIR).as_posix()
-    except ValueError:
-        # Custom KNOWLEDGE_DIR/CACHE_DIR outside the server folder (tests).
-        return f"{root.name}/{path.name}"
-
-
-def _file_digest(path: Path) -> str | None:
-    """SHA-256 of a knowledge file's content, independent of mtime or host."""
-    try:
-        if path.suffix.lower() == ".pdf":
-            return _digest_bytes(path.read_bytes())
-        text = _normalise_text(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError):
-        return None
-    return _digest_bytes(text.encode("utf-8"))
-
-
-def _web_digest(path: Path) -> str | None:
-    """SHA-256 of a cached page's extracted text (not its fetch timestamp)."""
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return _file_digest(path)
-
-    text = payload.get("text") if isinstance(payload, dict) else None
-    if not isinstance(text, str):
-        text = ""
-    return _digest_bytes(_normalise_text(text).encode("utf-8"))
-
-
-def source_digests() -> dict[str, str]:
-    """SHA-256 per source, keyed by a stable relative path.
-
-    Text files hash their UTF-8 content with ``\\r\\n`` normalised to ``\\n``;
-    PDFs hash their bytes; cached pages hash their extracted text. No mtime,
-    size or fetch time is used, so the same sources produce the same digests on
-    any machine and checkout.
-    """
-    digests: dict[str, str] = {}
-    for root, suffixes, digest in (
-        (config.KNOWLEDGE_DIR, KNOWLEDGE_SUFFIXES, _file_digest),
-        (config.URL_CACHE_DIR, {".json"}, _web_digest),
+def source_files() -> list[list]:
+    """File fingerprints (name, size, mtime) used to invalidate the index."""
+    files: list[list] = []
+    for root, suffixes in (
+        (config.KNOWLEDGE_DIR, KNOWLEDGE_SUFFIXES),
+        (config.URL_CACHE_DIR, {".json"}),
     ):
         if not root.exists():
             continue
-        for path in sorted(root.iterdir(), key=lambda entry: entry.name):
+        for path in sorted(root.iterdir()):
             if not path.is_file() or path.suffix.lower() not in suffixes:
                 continue
             if path.name == "urls.txt":
                 continue
-            value = digest(path)
-            if value is None:
+            try:
+                stat = path.stat()
+            except OSError:
                 continue
-            digests[_relative_name(path, root)] = value
-    return digests
+            files.append([f"{root.name}/{path.name}", stat.st_size, stat.st_mtime_ns])
+    return files

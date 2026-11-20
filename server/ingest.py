@@ -38,14 +38,10 @@ def main(argv: list[str] | None = None) -> int:
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)-8s %(message)s")
 
-    if config.INGEST_FETCH_URLS and not args.local_only:
+    if not args.local_only:
         urls = read_urls()
         log.info("fetching %d URL(s)", len(urls))
         _fetch_urls(urls)
-    else:
-        # Offline/production runs reuse the pages committed in .cache/urls, so a
-        # flaky site (403, DNS failure) cannot break the build.
-        log.info("using cached web pages (INGEST_FETCH_URLS=0)")
 
     index = rebuild()
     for document in index["details"]:
@@ -56,10 +52,6 @@ def main(argv: list[str] | None = None) -> int:
         index["documents"],
         index["dimensions"],
         index["built_at"],
-    )
-    print(
-        f"Index ready: {index['chunks']} chunk(s) from {index['documents']} "
-        f"document(s), {index['dimensions']} dim(s)"
     )
     return 0
 

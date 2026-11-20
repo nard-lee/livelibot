@@ -196,10 +196,11 @@ def _retrieve(message: str, history: list[dict] | None) -> list[dict]:
         # topic, so retrieval also runs against the previous question.
         hits = _merge_hits(hits, search(previous, k=max(2, config.RAG_TOP_K - 2)))
 
-    # Counts and source ids only: questions are never logged.
     log.info(
-        "retrieved %d chunk(s): %s",
+        "retrieved %d chunk(s) for %r%s: %s",
         len(hits),
+        message[:60],
+        f" (+history: {previous[:40]!r})" if previous else "",
         [(hit["score"], hit["source_id"]) for hit in hits],
     )
     return hits
@@ -244,7 +245,7 @@ def _looks_like_refusal(text: str) -> bool:
 def generate_reply(message: str, history: list[dict] | None = None) -> tuple[str, list[dict]]:
     """Retrieve context and answer in one shot. Returns (reply, sources)."""
     if is_conversational(message):
-        log.info("conversational message")
+        log.info("conversational message: %r", message[:60])
         return _converse(message, history), []
 
     hits = _retrieve(message, history)
@@ -293,7 +294,7 @@ def _stream_conversational(message: str, history: list[dict] | None):
 def stream_reply(message: str, history: list[dict] | None = None):
     """Yield SSE-ready events: sources, token deltas, then done (or error)."""
     if is_conversational(message):
-        log.info("conversational message (stream)")
+        log.info("conversational message (stream): %r", message[:60])
         yield from _stream_conversational(message, history)
         return
 

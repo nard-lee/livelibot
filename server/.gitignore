@@ -1,7 +1,6 @@
 .venv/
 __pycache__/
 *.pyc
-.cache/extracted/
-.cache/models/
-.index/partial*
+.cache/
+.index/
 .env

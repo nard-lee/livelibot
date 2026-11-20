@@ -13,13 +13,13 @@ INGEST (startup / upload / url change / delete)
                         ▼
              rag/chunking.py (heading-aware chunks)
                         ▼
-             rag/embedder.py (Gemini batchEmbedContents)
+             rag/embedder.py (fastembed MiniLM, ONNX)
                         ▼
              .index/vectors.npy + .index/index.json
                   (+ in-memory BM25 over chunks)
 
 QUERY
-  question ──▶ embed (query) ──▶ dense cosine ─┐
+  question ──▶ embed ──▶ dense cosine ─┐
            └─▶ tokenize ─▶ BM25 ───────┤
                                         ▼
                           reciprocal rank fusion (top 20)
@@ -106,20 +106,13 @@ with `RAG_CHUNK_OVERLAP` (default 120) characters of overlap.
 
 ## 3. Embedding (`rag/embedder.py`)
 
-- Model: `gemini-embedding-001` (`EMBED_MODEL`), called through the Gemini
-  `batchEmbedContents` endpoint — no local model, no ONNX runtime, so process
-  memory stays small enough for the Render free tier.
-- `embed(texts)` sends batches of 32. Indexed chunks use
-  `taskType = RETRIEVAL_DOCUMENT`; the live question uses `RETRIEVAL_QUERY`
-  (asymmetric embeddings, which is what the task types are for).
-- 429/500/503 are retried with backoff (5 s, 20 s, 60 s), extended to the
-  provider's `retryDelay` / `Retry-After` when present — the free-tier
-  embedding quota is per minute, so short retries just burn the window. After
-  the last attempt the error names the status and the provider message. Other
-  statuses fail immediately; a missing key raises `LLMConfigError` before any
-  request is sent.
-- The embedder returns raw floats; `rag/index.py` L2-normalises them, so cosine
-  similarity is a plain dot product.
+- Model: `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`
+  (`EMBED_MODEL`), multilingual English/Tagalog, executed by `fastembed` (ONNX).
+- The model is cached under `.cache/models` (pinned in-project because the
+  default `%TEMP%` cache forces a ~90 MB re-download).
+- `_model()` is `lru_cache(maxsize=1)`; `embed(texts)` returns plain floats.
+- Query vectors and indexed vectors are L2-normalised, so cosine similarity is a
+  plain dot product.
 
 ---
 
@@ -130,61 +123,39 @@ vector matrix, BM25, embedding metadata, fingerprint, build time.
 
 ### Fingerprint
 
-The fingerprint is a **component dict**, hashed with `sha256` over canonical
-JSON and stored next to its components in `index.json`:
+`sha256` over a sorted JSON payload of:
 
-- `INDEX_VERSION` (currently `9`; bump when chunking/format changes),
+- `INDEX_VERSION` (currently `7`; bump when chunking/format changes),
 - `EMBED_MODEL`,
-- `RAG_CHUNK_CHARS` and `RAG_CHUNK_OVERLAP`,
-- `files`: one `sha256(content)` per source, keyed by relative path
-  (`knowledge/x.md`, `.cache/urls/<id>.json`). Text files hash their UTF-8
-  content with `\r\n` normalised to `\n`, PDFs hash their bytes, and cached web
-  pages hash their extracted `text` — never `fetched_at`, title, `mtime` or
-  size.
+- chunk settings `[RAG_CHUNK_CHARS, RAG_CHUNK_OVERLAP]`,
+- every source file's `name`, `size`, `mtime_ns`.
 
 `ensure_index()`:
 
-1. Recompute the components and fingerprint; if it matches the in-memory one,
-   return.
-2. Try loading `.index/` from disk (fingerprint, version and component dict
-   must match; vector row count must match item count).
-3. On mismatch, log **one** line naming the differing components (for example
-   `files changed: knowledge/x.md; settings changed: EMBED_MODEL`) and serve
-   "The knowledge base is being updated". Startup never rebuilds and never
-   calls the embedding API.
-4. Only an explicit rebuild (`python ingest.py`, or an admin upload/delete with
-   `force=True`) reads sources → chunks → embeds → saves.
-
-`python fingerprint_check.py [--json]` prints the current components plus the
-committed fingerprint, so a local checkout and Render can be compared.
+1. Recompute the fingerprint; if it matches the in-memory one, return.
+2. Try loading `.index/` from disk (fingerprint and version must match, vector
+   row count must match item count).
+3. Otherwise rebuild: read sources → chunk → embed → save.
 
 ### Vector reuse
 
 On rebuild, chunks whose **exact text** is already in the current in-memory
-index reuse their vectors; only new text is embedded, in batches of 32 with
-`EMBED_DELAY_SECONDS` between batches. Each finished batch is persisted to
-`.index/partial.npz` before the next one starts, so an interrupted ingest keeps
-its progress and the next run resumes from that point instead of re-embedding.
+index reuse their vectors; only new text is embedded, in batches of 32. This
+keeps uploads cheap when most of the corpus is unchanged.
 
 ### Persistence
 
-- `.index/index.json` and `.index/vectors.npy` are committed to git, so a fresh
-  clone loads them without calling the embedding API.
-- `.index/index.json`: metadata, the `fingerprint_components` dict, the
-  `fingerprint` hash, plus all chunk items (`source_id`, `title`, `url`,
-  `content`) and a UTC `built_at`.
+- `.index/index.json`: metadata plus all chunk items
+  (`source_id`, `title`, `url`, `content`) and a UTC `built_at`.
 - `.index/vectors.npy`: normalized `float32` matrix.
-- `.index/partial.npz`: git-ignored progress file for interrupted ingests.
 - Writes go to pid-suffixed temp files and `os.replace` them into place, so the
   server and `ingest.py` can write concurrently without corrupting the index.
 
 ### Warmup (`warm()`)
 
-At startup (daemon thread, `WARMUP=1`): `ensure_index()`, then parse documents
-once so PDF extraction is cached before the first user question. No model is
-loaded — embeddings are remote calls. A matching committed index is loaded, so
-no embedding request is made; any mismatch yields the "updating" message and a
-one-line component diff instead of a rebuild.
+At startup (daemon thread, `WARMUP=1`): `ensure_index()`, embed a warmup string
+to load the model, and parse documents once so PDF extraction is cached before
+the first user question.
 
 ---
 
@@ -312,7 +283,7 @@ loader).
 | `rag/loaders.py` | File/PDF/URL loading, trafilatura extraction, title cleanup |
 | `rag/safety.py` | HTML-comment/injection stripping, `<context>` markers |
 | `rag/chunking.py` | Heading-aware, paragraph/sentence chunking with overlap |
-| `rag/embedder.py` | Gemini batch embedding client (document + query task types) |
+| `rag/embedder.py` | fastembed model wrapper, project-local model cache |
 | `rag/keyword.py` | Tokenizer, BM25, reciprocal rank fusion |
 | `rag/index.py` | Fingerprint, build, vector reuse, atomic persistence, warmup |
 | `rag/search.py` | Hybrid retrieval: fuse → gate → dedupe → rerank → cap |
@@ -327,7 +298,7 @@ loader).
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `EMBED_MODEL` | `gemini-embedding-001` | Embedding model |
+| `EMBED_MODEL` | `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` | Embedding model |
 | `RAG_TOP_K` | `5` | Chunks passed to the model |
 | `RAG_MIN_SCORE` | `0.30` | Dense gate (paired with BM25 gate) |
 | `RAG_CHUNK_CHARS` | `800` | Max chunk size |
@@ -342,13 +313,11 @@ loader).
 | `RAG_RERANK` | `1` | Enable LLM rerank |
 | `RAG_RERANK_CANDIDATES` | `20` | Passages shown to the reranker |
 | `RAG_RERANK_MAX_TOKENS` | `600` | Reranker output budget |
-| `INDEX_VERSION` | `9` | Bump to invalidate on-disk indexes |
+| `INDEX_VERSION` | `7` | Bump to invalidate on-disk indexes |
 | `WARMUP` | `1` | Warm index + model at startup |
-| `INGEST_FETCH_URLS` | `1` | Fetch `urls.txt`; `0` reuses `.cache/urls` |
-| `EMBED_DELAY_SECONDS` | `1` | Pause between embedding batches |
 
 Paths default to `server/knowledge`, `server/.cache`, `server/.cache/urls`,
-`server/.index`.
+`server/.index`, `server/.cache/models`.
 
 ---
 
@@ -356,18 +325,11 @@ Paths default to `server/knowledge`, `server/.cache`, `server/.cache/urls`,
 
 - **Vectors are always L2-normalized**; never persist unnormalized rows, or
   cosine becomes a magnitude contest.
-- **The fingerprint is the only staleness signal.** It is stored as a component
-  dict so a mismatch names the exact settings or files that differ; bump
-  `INDEX_VERSION` for chunking/format changes. Content hashing (SHA-256) means
-  same-size edits and line-ending changes are handled correctly, and the index
-  built on one machine matches a clone on another.
-- **The index is a build artifact committed to git.** Rebuild locally with
-  `python ingest.py`, then `git add .index .cache/urls && git commit`. Startup
-  never rebuilds or embeds; a mismatch serves an "updating" message and logs one
-  component diff line. Use `fingerprint_check.py` to compare machines.
+- **The fingerprint is the only staleness signal.** Editing a source file,
+  changing the embedding model, or changing chunk sizes rebuilds; bump
+  `INDEX_VERSION` for chunking/format changes.
 - **Writes are atomic** (`os.replace` from a pid-suffixed temp file) because the
-  API server and `ingest.py` can build concurrently. Interrupted ingests resume
-  from the atomically written `.index/partial.npz`.
+  API server and `ingest.py` can build concurrently.
 - **The per-source cap runs last**, after rerank, so one long document cannot
   monopolize the context window.
 - **Dense score is informational after fusion.** Displayed `score` is cosine,

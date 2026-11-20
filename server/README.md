@@ -16,44 +16,18 @@ pip install -r requirements.txt
 
 copy .env.example .env    # then set GEMINI_API_KEY
 
-python ingest.py         # fetch URLs + build the index (commit .index + .cache/urls)
+python ingest.py         # fetch URLs + build the index
 python app.py            # http://127.0.0.1:5001
 ```
 
-The Vite dev server proxies `/api` to port 5001, so run the client separately
-while developing. Flask also serves the production build: when `client/dist`
-exists, `/` and every non-`/api` path return the Vite app (unknown paths fall
-back to `index.html`); build it with `npm run build` in `client/`. Manage
-knowledge from the client's **Library** page (upload, delete, reindex)
+The Vite dev server proxies `/api` to port 5001, so run the client separately.
+Manage knowledge from the client's **Library** page (upload, delete, reindex)
 or with `python ingest.py`. While indexing, the page shows a package-manager style log — files parsed,
 per-document chunk counts, embedding batches, save and completion — plus a
 progress bar and elapsed time, fed by `GET /api/index/progress`. The log stays
 visible after the run finishes (until dismissed) and the panel offers
 **Upload another**, **Add another**, **Retry**, and **Dismiss** actions. Each
 web-page row also has **Fetch / Re-fetch** (re-download and re-index) and delete.
-
-## Deploy on Render (free plan)
-
-Build: `pip install -r server/requirements.txt && cd client && npm install && npm run build`
-Start: `cd server && gunicorn -w 1 --threads 4 -t 120 -b 0.0.0.0:$PORT app:app`
-
-Both commands run from the repo root. The built index (`.index/`) and the web
-page cache (`.cache/urls/`) are committed, so the build installs dependencies
-and compiles the client only — it never calls the embedding API and a flaky
-source site (403, DNS failure) cannot break a deploy. To regenerate the index on
-the build host, run it offline with `INGEST_FETCH_URLS=0 python ingest.py`.
-`PYTHON_VERSION=3.10.11` pins Python; if `npm` is missing on the build host, set
-`NODE_VERSION` too. Because Flask serves `client/dist` at `/`, the API and UI
-share one origin — leave `ALLOWED_ORIGIN` empty (`ADMIN_ENABLED=0` keeps the API
-read-only). Render provides `PORT`. `GEMINI_API_KEY` is needed at runtime for
-answers, not at build time.
-
-At startup the app loads the committed index when its fingerprint matches the
-sources. If it does not match, it logs one line naming the differing components
-(for example `files changed: knowledge/x.md; settings changed: EMBED_MODEL`) and
-answers with "The knowledge base is being updated" — it never rebuilds or calls
-the embedding API at startup. To compare a local checkout with Render, run
-`python fingerprint_check.py` (or `--json`) in `server/`.
 
 ## API
 
@@ -88,20 +62,15 @@ oversized upload, and `502` when the LLM call fails, all with a JSON `error`.
 3. **Chunking** (`rag/chunking.py`) — paragraph and sentence boundaries, bullet
    lines preserved, markdown headings prepended as a `Section > Subsection`
    breadcrumb. Chunks overlap so facts split across a boundary stay retrievable.
-4. **Embedding** (`rag/embedder.py`) — Gemini's `batchEmbedContents` endpoint
-   (`gemini-embedding-001`), so no local model is loaded and the server stays
-   small enough for a 512 MB instance.
+4. **Embedding** (`rag/embedder.py`) — `fastembed` ONNX model
+   `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`, cached in
+   `.cache/models` (not `%TEMP%`, which gets wiped).
 5. **Index** (`rag/index.py`) — normalised vectors persisted to `.index/`
-   (`index.json` + `vectors.npy`) and reloaded on start. The index is committed
-   so a fresh clone and the Render build work offline. The fingerprint is a
-   component dict — `INDEX_VERSION`, `EMBED_MODEL`, chunk settings, and one
-   SHA-256 per source keyed by relative path (line endings normalised; cached
-   web pages hash their extracted text, not their fetch time). Both the
-   fingerprint hash and its component dict are stored in `index.json`, so a
-   mismatch names exactly which settings or files differ. Set `INDEX_VERSION`
-   in `config.py` when chunking or index format changes. Startup warms the index
-   (documents parsed once) in a background thread; a stale index is reported as
-   "updating" instead of rebuilt.
+   (`index.json` + `vectors.npy`) and reloaded on start. A fingerprint of source
+   file stats, model name and chunk settings decides whether the cache is valid,
+   so editing a document triggers a rebuild on the next request. Set
+   `INDEX_VERSION` in `config.py` when chunking or index format changes.
+   Startup warms the index and embedding model in a background thread.
 6. **Retrieval** (`rag/search.py`) — dense cosine and BM25 scores are fused with
    reciprocal rank fusion, near-duplicate chunks are dropped, candidates above
    the score floor are reranked by the generation model, and at most
@@ -126,26 +95,9 @@ oversized upload, and `502` when the LLM call fails, all with a JSON `error`.
    regenerated in conversational mode with the topic menu (streams peek at the
    first sentence and switch before showing a bare refusal).
 
-Rebuild the committed index whenever knowledge files or cached pages change:
-
-```powershell
-python ingest.py                 # fetch URLs locally, then build .index/
-git add .index .cache/urls
-git commit -m "Rebuild knowledge index"
-```
-
-`INGEST_FETCH_URLS=0 python ingest.py` (or `python ingest.py --local-only`)
-reuses the pages committed in `.cache/urls` and never touches the network.
-Delete `.index/` to force a cold rebuild. Interrupted runs keep every finished
-embedding batch in `.index/partial.npz` (git-ignored); rerunning continues from
-that point. `EMBED_DELAY_SECONDS` controls the pause between batches.
-
-To see why a committed index is rejected, run:
-
-```powershell
-python fingerprint_check.py        # components + committed fingerprint
-python fingerprint_check.py --json # same, easy to diff between machines
-```
+Rebuild explicitly with `python ingest.py` (fetches URLs) or
+`python ingest.py --local-only` (reuses the URL cache). Delete `.index/` to
+force a cold rebuild.
 
 Uploads through the API are capped by `MAX_UPLOAD_BYTES` (10 MB by default).
 Local ingestion has **no size cap**: copy files into `knowledge/` and run
@@ -162,11 +114,11 @@ helpers), so imports elsewhere stay short.
 | --- | --- |
 | `rag/store.py` | Facade: re-exports the pipeline (`from rag import search, stats, rebuild, warm`). |
 | `rag/progress.py` | Indexing stage + rolling log used by `GET /api/index/progress` and the Library panel. |
-| `rag/sources.py` | Read `knowledge/` files and cached web pages into `{id, title, url, text}`; PDF text cache; per-source content digests. |
+| `rag/sources.py` | Read `knowledge/` files and cached web pages into `{id, title, url, text}`; PDF text cache; source fingerprints. |
 | `rag/index.py` | Chunk, embed (reusing unchanged vectors), fingerprint, save/load `.index/`, rebuild, warmup. |
 | `rag/search.py` | Hybrid retrieval: dense + BM25 → RRF → dedupe → rerank → per-source cap. |
 | `rag/chunking.py` | Paragraph/sentence-aware chunking with heading breadcrumbs. |
-| `rag/embedder.py` | Gemini embedding client (batched, retries on 429/5xx). |
+| `rag/embedder.py` | `fastembed` model wrapper (model cached under `.cache/models`). |
 | `rag/keyword.py` | Tokeniser, BM25 implementation, reciprocal rank fusion. |
 | `rag/rerank.py` | Optional LLM rerank of fused candidates. |
 | `rag/loaders.py` | File/URL text extraction (trafilatura + pypdf) and title helpers. |
@@ -187,9 +139,9 @@ Most settings come from `.env` (see `config.py` for defaults):
 | `TEMPERATURE` | `0.2` | Sampling temperature. |
 | `HISTORY_MESSAGES` | `6` | Prior turns sent to the model. |
 | `PORT` | `5001` | Flask port. |
-| `ADMIN_ENABLED` | `0` | `0` hides every upload/URL/delete/rebuild route (404). |
-| `ALLOWED_ORIGIN` | — | Only origin allowed to call the API cross-origin; empty = same-origin only. |
-| `EMBED_MODEL` | `gemini-embedding-001` | Gemini embedding model id. |
+| `DEBUG` | `0` | Set to `1` for Flask debug + reloader (leaks processes on Windows). |
+| `CLIENT_ORIGIN` | `*` | `Access-Control-Allow-Origin`. |
+| `EMBED_MODEL` | multilingual MiniLM | `fastembed` model name. |
 | `RAG_TOP_K` | `5` | Chunks kept per question. |
 | `RAG_MIN_SCORE` | `0.30` | Minimum cosine similarity. |
 | `RAG_CANDIDATES` | `20` | Candidates passed to the reranker. |
@@ -199,12 +151,10 @@ Most settings come from `.env` (see `config.py` for defaults):
 | `RAG_RERANK_MODEL` | `openai/gpt-oss-20b` | Reranker model (fast). |
 | `RAG_RERANK_EFFORT` | `low` | Reasoning effort for the reranker. |
 | `RAG_CHUNK_CHARS` / `RAG_CHUNK_OVERLAP` | `800` / `120` | Chunk size and overlap. |
-| `MAX_MESSAGE_CHARS` | `500` | Rejects longer questions. |
+| `MAX_MESSAGE_CHARS` | `2000` | Rejects longer questions. |
 | `MAX_UPLOAD_BYTES` | `10485760` | Upload size limit (10 MB). Files copied directly into `knowledge/` are not limited. |
-| `WARMUP` | `1` | Load the index on startup. |
-| `INGEST_FETCH_URLS` | `1` | `python ingest.py` fetches pages from `urls.txt`; `0` reuses `.cache/urls`. |
-| `EMBED_DELAY_SECONDS` | `1` | Pause between embedding batches during ingest. |
-| `KNOWLEDGE_DIR`, `CACHE_DIR`, `INDEX_DIR` | paths under `server/` | Override storage locations. |
+| `WARMUP` | `1` | Warm index + model on startup. |
+| `KNOWLEDGE_DIR`, `CACHE_DIR`, `INDEX_DIR`, `EMBED_CACHE_DIR` | paths under `server/` | Override storage locations. |
 
 ## Tests
 
@@ -216,7 +166,4 @@ No pytest dependency; run the files directly:
 .\.venv\Scripts\python.exe tests\test_keyword.py
 .\.venv\Scripts\python.exe tests\test_safety.py
 .\.venv\Scripts\python.exe tests\test_intent.py
-.\.venv\Scripts\python.exe tests\test_fingerprint.py
-.\.venv\Scripts\python.exe tests\test_encoding.py
-.\.venv\Scripts\python.exe tests\test_urls.py
 ```
